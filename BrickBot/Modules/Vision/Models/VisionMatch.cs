@@ -26,7 +26,10 @@ public sealed record FindOptions(
     RegionOfInterest? Roi = null,
     double Scale = 1.0,
     bool Grayscale = false,
-    bool Pyramid = false);
+    bool Pyramid = false,
+    bool Edge = false,
+    int EdgeLow = 50,
+    int EdgeHigh = 150);
 
 public sealed record RegionOfInterest(int X, int Y, int Width, int Height);
 
@@ -61,9 +64,36 @@ public sealed record FeatureMatchOptions(
     RegionOfInterest? Roi = null,
     double ScaleMin = 0.9,
     double ScaleMax = 1.1,
-    int ScaleSteps = 3);
+    int ScaleSteps = 3,
+    bool Edge = false);
 
 public sealed record FindColorsOptions(
     RegionOfInterest? Roi = null,
     int MinArea = 25,
-    int MaxResults = 32);
+    int MaxResults = 32,
+    ColorSpace ColorSpace = ColorSpace.Rgb);
+
+/// <summary>
+/// Color-matching space. Serialized camelCase by IpcHandler so the frontend literal type is
+/// <c>'rgb' | 'hsv'</c>.
+///
+/// <para><b>RGB</b> — match against a per-channel BGR range. Cheap; sensitive to lighting/filters.</para>
+/// <para><b>HSV</b> — convert frame to HSV first, then threshold around the target color's hue
+/// (with a wide saturation/value window). Robust against brightness changes and minor color
+/// grading; preferred for game UI elements that get drawn on top of varying backgrounds.</para>
+/// </summary>
+public enum ColorSpace
+{
+    Rgb,
+    Hsv,
+}
+
+/// <summary>Direction the bar fills toward. Drives the orthogonal-line scan in
+/// <see cref="Services.IVisionService.LinearFillRatio"/>.</summary>
+public enum FillDirection
+{
+    LeftToRight,
+    RightToLeft,
+    TopToBottom,
+    BottomToTop,
+}

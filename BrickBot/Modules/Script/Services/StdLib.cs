@@ -182,6 +182,118 @@ internal static class StdLib
     },
   };
 
+  // ---------------- detect — typed, persisted vision rules ----------------
+  //
+  // Each definition lives at data/profiles/{id}/detections/{id}.json (managed by the UI).
+  // The host exposes:
+  //   __host.listDetections()             → [DetectionDefinition]
+  //   __host.runDetection(id)             → DetectionResult
+  //   __host.runDetectionDefinition(d)    → DetectionResult  (inline, for live preview)
+  //   __host.resetDetections()
+  //
+  // The wrapper below applies the def.output bindings (ctx writes + brickbot.emit) so users
+  // don't have to remember which key feeds where.
+
+  let __detectionDefs = null;
+  let __detectionLast = Object.create(null);  // id → last result value (for eventOnChangeOnly)
+
+  function __loadDetectionDefs() {
+    if (__detectionDefs === null) __detectionDefs = host.listDetections();
+    return __detectionDefs;
+  }
+
+  function __findDef(idOrName) {
+    const defs = __loadDetectionDefs();
+    for (const d of defs) {
+      if (d.id === idOrName || d.name === idOrName) return d;
+    }
+    return null;
+  }
+
+  /** Pick the value that gets written to ctx / sent as the event payload. */
+  function __resultValue(result) {
+    if (result.value != null) return result.value;
+    if (result.triggered != null) return result.triggered;
+    return result.found;
+  }
+
+  function __applyOutput(def, result) {
+    const out = def.output;
+    if (!out) return;
+    const value = __resultValue(result);
+    if (out.ctxKey) ctx.set(out.ctxKey, value);
+    if (out.event) {
+      const prev = __detectionLast[def.id];
+      const changed = prev === undefined || prev !== value;
+      if (!out.eventOnChangeOnly || changed) {
+        brickbot.emit(out.event, { id: def.id, name: def.name, value: value, result: result });
+      }
+    }
+    __detectionLast[def.id] = value;
+  }
+
+  globalThis.detect = {
+    /** Force a re-read of the detection definitions from disk (e.g. after the UI saves one). */
+    reload() {
+      __detectionDefs = null;
+      __detectionLast = Object.create(null);
+      host.resetDetections();
+    },
+
+    /** All loaded definitions (cached). */
+    list() { return __loadDetectionDefs().slice(); },
+
+    /**
+     * Run one detection by id (or name) against the current shared frame.
+     * Applies the definition's output bindings (ctx + event) before returning.
+     */
+    run(idOrName) {
+      const def = __findDef(idOrName);
+      if (!def) throw new Error('DETECTION_NOT_FOUND: ' + idOrName);
+      const r = host.runDetection(def.id);
+      __applyOutput(def, r);
+      return r;
+    },
+
+    /**
+     * Run every enabled definition. Two-pass to honor cross-detection ROI refs:
+     *   pass 1 — definitions whose ROI doesn't depend on another detection
+     *   pass 2 — definitions whose ROI uses fromDetectionId (parent already resolved)
+     * Cheap enough to call each tick; pair with `brickbot.runForever({ autoDetect: true })`.
+     */
+    runAll() {
+      const defs = __loadDetectionDefs();
+      const out = [];
+      const ranIds = Object.create(null);
+
+      const runOne = (def) => {
+        if (def.enabled === false) return;
+        try {
+          const r = host.runDetection(def.id);
+          __applyOutput(def, r);
+          out.push(r);
+          ranIds[def.id] = true;
+        } catch (e) {
+          log('[detect.runAll:' + def.id + '] ' + (e && e.message || e));
+        }
+      };
+
+      // Pass 1 — independents.
+      for (const def of defs) {
+        if (def.roi && def.roi.fromDetectionId) continue;
+        runOne(def);
+      }
+      // Pass 2 — dependents (parent already in lastResults from pass 1).
+      for (const def of defs) {
+        if (!ranIds[def.id] && def.roi && def.roi.fromDetectionId) runOne(def);
+      }
+      return out;
+    },
+
+    /** Run an in-memory definition without persisting — used by the editor's live preview. */
+    test(definition) { return host.runDetectionDefinition(definition); },
+  };
+
   // ---------------- brickbot — event bus + actions + triggers + tick loop ----------------
 
   const __handlers = Object.create(null);     // eventName → [fn]
@@ -268,6 +380,7 @@ internal static class StdLib
     runForever(opts) {
       opts = opts || {};
       const tickMs = opts.tickMs != null ? opts.tickMs : 16;
+      const autoDetect = !!opts.autoDetect;
       __dispatch('start', null);
       try {
         while (!isCancelled()) {
@@ -283,6 +396,13 @@ internal static class StdLib
           catch (e) { __dispatch('error', { phase: 'pump', message: String(e) }); }
 
           if (pumped !== null) __dispatch('frame', pumped);
+
+          // Run all enabled detections — output bindings push into ctx + emit events
+          // so triggers/handlers downstream see fresh state before they evaluate.
+          if (autoDetect) {
+            try { detect.runAll(); }
+            catch (e) { __dispatch('error', { phase: 'detect', message: String(e) }); }
+          }
 
           // Evaluate declarative triggers.
           const t = now();

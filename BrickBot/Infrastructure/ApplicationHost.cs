@@ -7,6 +7,8 @@ using BrickBot.Modules.Core.Models;
 using BrickBot.Modules.Core.Services;
 using BrickBot.Modules.Core.Utilities;
 using BrickBot.Modules.Core.WebView;
+using BrickBot.Modules.Database;
+using BrickBot.Modules.Detection;
 using BrickBot.Modules.Input;
 using BrickBot.Modules.Core.Events;
 using BrickBot.Modules.Profile;
@@ -159,10 +161,12 @@ public sealed class ApplicationHost
 
         services
             .AddCoreServices()
+            .AddDatabaseServices()
             .AddCaptureServices()
             .AddVisionServices()
             .AddInputServices()
             .AddTemplateServices()
+            .AddDetectionServices()
             .AddScriptServices()
             .AddRunnerServices()
             .AddProfileServices()

@@ -1,7 +1,9 @@
 using BrickBot.Modules.Capture.Services;
 using BrickBot.Modules.Core.Exceptions;
+using BrickBot.Modules.Detection.Services;
 using BrickBot.Modules.Input.Services;
 using BrickBot.Modules.Runner.Services;
+using BrickBot.Modules.Template.Services;
 using BrickBot.Modules.Vision.Services;
 using Jint;
 using Jint.Native;
@@ -28,6 +30,9 @@ public sealed class JintScriptEngine : IScriptEngine
     private readonly IRunLog _log;
     private readonly IFrameBuffer _frameBuffer;
     private readonly IScriptDispatcher _dispatcher;
+    private readonly IDetectionFileService _detectionFiles;
+    private readonly IDetectionRunner _detectionRunner;
+    private readonly ITemplateFileService _templateFiles;
 
     public JintScriptEngine(
         IVisionService vision,
@@ -35,7 +40,10 @@ public sealed class JintScriptEngine : IScriptEngine
         IInputService input,
         IRunLog log,
         IFrameBuffer frameBuffer,
-        IScriptDispatcher dispatcher)
+        IScriptDispatcher dispatcher,
+        IDetectionFileService detectionFiles,
+        IDetectionRunner detectionRunner,
+        ITemplateFileService templateFiles)
     {
         _vision = vision;
         _templates = templates;
@@ -43,11 +51,19 @@ public sealed class JintScriptEngine : IScriptEngine
         _log = log;
         _frameBuffer = frameBuffer;
         _dispatcher = dispatcher;
+        _detectionFiles = detectionFiles;
+        _detectionRunner = detectionRunner;
+        _templateFiles = templateFiles;
     }
 
     public void Execute(ScriptRunRequest run, IScriptHost host, ScriptContext context)
     {
-        using var hostApi = new HostApi(_vision, _templates, _input, _log, host, _frameBuffer, _dispatcher);
+        // Detections are per-Run state — runner reset clears effect baselines so a fresh
+        // run starts with no stale baselines from the previous Run.
+        _detectionRunner.Reset();
+        using var hostApi = new HostApi(
+            _vision, _templates, _input, _log, host, _frameBuffer, _dispatcher,
+            _detectionFiles, _detectionRunner, _templateFiles);
 
         var engine = new Engine(options =>
         {
@@ -84,7 +100,8 @@ public sealed class JintScriptEngine : IScriptEngine
                 {
                     var builtin = engine.Evaluate(
                         "({ vision: vision, input: input, combat: combat, ctx: ctx, " +
-                        "brickbot: brickbot, log: log, wait: wait, isCancelled: isCancelled, now: now })");
+                        "brickbot: brickbot, detect: detect, log: log, wait: wait, " +
+                        "isCancelled: isCancelled, now: now })");
                     moduleCache[id] = builtin;
                     return builtin;
                 }

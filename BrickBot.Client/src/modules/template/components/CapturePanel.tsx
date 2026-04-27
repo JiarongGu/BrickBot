@@ -39,7 +39,7 @@ import {
   type VisionMatch,
 } from '@/modules/vision';
 import { templateService } from '../services/templateService';
-import type { CropRect } from '../types';
+import type { CropRect, TemplateInfo } from '../types';
 import './CapturePanel.css';
 
 interface CaptureState {
@@ -85,7 +85,7 @@ export const CapturePanel: React.FC = () => {
   const [grabbing, setGrabbing] = useState(false);
   const [crop, setCrop] = useState<CropRect | undefined>();
   const [hover, setHover] = useState<HoverState | undefined>();
-  const [templates, setTemplates] = useState<string[]>([]);
+  const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [saveModalOpen, setSaveModalOpen] = useState(false);
   const [saveForm] = Form.useForm();
 
@@ -111,9 +111,9 @@ export const CapturePanel: React.FC = () => {
 
   const refreshTemplates = useCallback(async () => {
     if (!profileId) return;
-    const { templates: names } = await templateService.list(profileId);
-    setTemplates(names);
-    if (!tplConfig.name && names.length > 0) setTplConfig((c) => ({ ...c, name: names[0] }));
+    const { templates: list } = await templateService.list(profileId);
+    setTemplates(list);
+    if (!tplConfig.name && list.length > 0) setTplConfig((c) => ({ ...c, name: list[0].name }));
   }, [profileId, tplConfig.name]);
 
   useEffect(() => { void refreshWindows(); }, [refreshWindows]);
@@ -376,12 +376,16 @@ export const CapturePanel: React.FC = () => {
     return off.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
   }, [capture, crop]);
 
-  const onSave = async (values: { name: string }) => {
+  const onSave = async (values: { name: string; description?: string }) => {
     if (!profileId) { message.error(t('capture.noProfile', 'No active profile.')); return; }
     if (!cropPngBase64) { message.error(t('capture.noCrop', 'Drag a rectangle on the image first.')); return; }
     try {
-      await templateService.save(profileId, values.name, cropPngBase64);
-      const inserted = useEditorBridgeStore.getState().insertAtCursor(`vision.find('${values.name}.png')`);
+      const saved = await templateService.save(profileId, {
+        name: values.name,
+        description: values.description,
+        pngBase64: cropPngBase64,
+      });
+      const inserted = useEditorBridgeStore.getState().insertAtCursor(`vision.find('${saved.name}')`);
       message.success(inserted
         ? t('capture.savedAndInserted', 'Template saved and inserted at cursor')
         : t('capture.saved', 'Template saved'));
@@ -391,9 +395,9 @@ export const CapturePanel: React.FC = () => {
     } catch (err) { message.error(String(err)); }
   };
 
-  const onDeleteTemplate = async (name: string) => {
+  const onDeleteTemplate = async (id: string) => {
     if (!profileId) return;
-    await templateService.delete(profileId, name);
+    await templateService.delete(profileId, id);
     await refreshTemplates();
   };
 
@@ -515,24 +519,27 @@ export const CapturePanel: React.FC = () => {
               <List
                 size="small"
                 dataSource={templates}
-                renderItem={(name) => (
+                renderItem={(tpl) => (
                   <List.Item
                     actions={[
                       <Tooltip key="test" title={t('capture.detect.testThis', 'Test this template')}>
                         <CompactButton size="small" type="text" icon={<AimOutlined />}
                           disabled={!capture}
-                          onClick={() => { setMethod('template'); setTplConfig((c) => ({ ...c, name })); }} />
+                          onClick={() => { setMethod('template'); setTplConfig((c) => ({ ...c, name: tpl.name })); }} />
                       </Tooltip>,
                       <Popconfirm key="del"
                         title={t('capture.templates.deleteConfirm', 'Delete this template?')}
                         okText={t('common.delete')} cancelText={t('common.cancel')}
                         okButtonProps={{ danger: true }}
-                        onConfirm={() => void onDeleteTemplate(name)}>
+                        onConfirm={() => void onDeleteTemplate(tpl.id)}>
                         <CompactDangerButton size="small" type="text" icon={<DeleteOutlined />} />
                       </Popconfirm>,
                     ]}
                   >
-                    <span className="capture-panel__template-name">{name}.png</span>
+                    <div className="capture-panel__template-name">
+                      {tpl.name}
+                      {tpl.description && <div style={{ fontSize: 12, color: 'var(--color-text-tertiary)' }}>{tpl.description}</div>}
+                    </div>
                   </List.Item>
                 )}
               />
@@ -614,12 +621,15 @@ export const CapturePanel: React.FC = () => {
           <Form.Item
             label={t('capture.templateName', 'Template name')}
             name="name"
-            rules={[
-              { required: true, message: t('script.create.nameRequired', 'Name is required') },
-              { pattern: /^[A-Za-z0-9_\-]+$/, message: t('script.create.nameInvalid', 'Letters, numbers, _, - only') },
-            ]}
+            rules={[{ required: true, message: t('script.create.nameRequired', 'Name is required') }]}
           >
-            <CompactInput placeholder="bobber" addonAfter=".png" />
+            <CompactInput placeholder="bobber" />
+          </Form.Item>
+          <Form.Item
+            label={t('capture.templateDescription', 'Description (optional)')}
+            name="description"
+          >
+            <CompactInput placeholder={t('capture.templateDescription.placeholder', 'What this captures, when to use it...') as string} />
           </Form.Item>
         </Form>
       </FormDialog>
@@ -631,7 +641,7 @@ export const CapturePanel: React.FC = () => {
 
 const TemplateConfigForm: React.FC<{
   config: TemplateConfig;
-  templates: string[];
+  templates: TemplateInfo[];
   onChange: (c: TemplateConfig) => void;
 }> = ({ config, templates, onChange }) => {
   const { t } = useTranslation();
@@ -642,7 +652,7 @@ const TemplateConfigForm: React.FC<{
           placeholder={t('capture.detect.pickTemplate', 'Pick a template')}
           value={config.name}
           onChange={(name) => onChange({ ...config, name })}
-          options={templates.map((n) => ({ value: n, label: `${n}.png` }))}
+          options={templates.map((tpl) => ({ value: tpl.name, label: tpl.name }))}
           style={{ width: '100%' }}
           disabled={templates.length === 0}
         />
@@ -706,7 +716,7 @@ const ColorsConfigForm: React.FC<{ config: ColorsConfig; onChange: (c: ColorsCon
 
 const PercentBarConfigForm: React.FC<{
   config: PercentBarConfig;
-  templates: string[];
+  templates: TemplateInfo[];
   onChange: (c: PercentBarConfig) => void;
 }> = ({ config, templates, onChange }) => {
   const { t } = useTranslation();
@@ -721,7 +731,7 @@ const PercentBarConfigForm: React.FC<{
           placeholder={t('capture.detect.pickTemplate', 'Pick a template')}
           value={config.templateName}
           onChange={(name) => onChange({ ...config, templateName: name })}
-          options={templates.map((n) => ({ value: n, label: `${n}.png` }))}
+          options={templates.map((tpl) => ({ value: tpl.name, label: tpl.name }))}
           style={{ width: '100%' }}
           disabled={templates.length === 0}
         />

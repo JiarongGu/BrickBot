@@ -1,7 +1,9 @@
 using BrickBot.Modules.Capture.Models;
 using BrickBot.Modules.Capture.Services;
 using BrickBot.Modules.Core.Exceptions;
+using BrickBot.Modules.Detection.Services;
 using BrickBot.Modules.Input.Services;
+using BrickBot.Modules.Template.Services;
 using BrickBot.Modules.Runner.Services;
 using BrickBot.Modules.Script.Services;
 using BrickBot.Modules.Vision.Services;
@@ -19,6 +21,9 @@ public class JintScriptEngineTests
     private readonly Mock<IScriptHost> _host = new();
     private readonly Mock<IFrameBuffer> _frameBuffer = new();
     private readonly Mock<IScriptDispatcher> _dispatcher = new();
+    private readonly Mock<IDetectionFileService> _detectionFiles = new();
+    private readonly Mock<IDetectionRunner> _detectionRunner = new();
+    private readonly Mock<ITemplateFileService> _templateFiles = new();
 
     public JintScriptEngineTests()
     {
@@ -34,7 +39,8 @@ public class JintScriptEngineTests
 
     private JintScriptEngine BuildEngine() =>
         new(_vision.Object, _templates.Object, _input.Object, _log.Object,
-            _frameBuffer.Object, _dispatcher.Object);
+            _frameBuffer.Object, _dispatcher.Object,
+            _detectionFiles.Object, _detectionRunner.Object, _templateFiles.Object);
 
     [Fact]
     public void Require_BrickbotModule_ExposesHostGlobals()

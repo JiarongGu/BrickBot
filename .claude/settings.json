@@ -32,7 +32,10 @@
       "Bash(git commit -m ' *)",
       "Bash(git branch *)",
       "Bash(git config *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(echo \"---exit $?\")",
+      "Read(//d/Development/D3dxSkinManager/**)",
+      "Bash(echo \"---tsc $?\")"
     ],
     "additionalDirectories": [
       ".claude",

@@ -8,6 +8,7 @@ public sealed class ScriptHost : IScriptHost
 {
     private readonly ICaptureService _capture;
 
+    public string ProfileId { get; }
     public nint TargetWindowHandle { get; }
     public int WindowOriginX { get; }
     public int WindowOriginY { get; }
@@ -16,6 +17,7 @@ public sealed class ScriptHost : IScriptHost
 
     public ScriptHost(
         ICaptureService capture,
+        string profileId,
         nint targetWindowHandle,
         int windowOriginX,
         int windowOriginY,
@@ -23,6 +25,7 @@ public sealed class ScriptHost : IScriptHost
         CancellationToken cancellation)
     {
         _capture = capture;
+        ProfileId = profileId;
         TargetWindowHandle = targetWindowHandle;
         WindowOriginX = windowOriginX;
         WindowOriginY = windowOriginY;

@@ -6,6 +6,7 @@ export type ModuleName =
   | 'VISION'
   | 'INPUT'
   | 'TEMPLATE'
+  | 'DETECTION'
   | 'SCRIPT'
   | 'RUNNER'
   | 'PROFILE'

@@ -2,12 +2,16 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using BrickBot.Modules.Capture.Models;
 using BrickBot.Modules.Capture.Services;
+using BrickBot.Modules.Detection.Models;
+using BrickBot.Modules.Detection.Services;
 using BrickBot.Modules.Input.Models;
 using BrickBot.Modules.Input.Services;
 using BrickBot.Modules.Runner.Services;
+using BrickBot.Modules.Template.Services;
 using BrickBot.Modules.Vision.Models;
 using BrickBot.Modules.Vision.Services;
 using OpenCvSharp;
+using VisionFeatureMatchOptions = BrickBot.Modules.Vision.Models.FeatureMatchOptions;
 
 namespace BrickBot.Modules.Script.Services;
 
@@ -26,6 +30,9 @@ public sealed class HostApi : IDisposable
     private readonly IScriptHost _host;
     private readonly IFrameBuffer _frameBuffer;
     private readonly IScriptDispatcher _dispatcher;
+    private readonly IDetectionFileService _detectionFiles;
+    private readonly IDetectionRunner _detectionRunner;
+    private readonly ITemplateFileService _templateFiles;
     /// <summary>Per-Run baseline cache for <c>vision.captureBaseline / vision.diff</c>.
     /// Mats are disposed when HostApi disposes (Run end).</summary>
     private readonly ConcurrentDictionary<string, Mat> _baselines = new(StringComparer.Ordinal);
@@ -37,7 +44,10 @@ public sealed class HostApi : IDisposable
         IRunLog log,
         IScriptHost host,
         IFrameBuffer frameBuffer,
-        IScriptDispatcher dispatcher)
+        IScriptDispatcher dispatcher,
+        IDetectionFileService detectionFiles,
+        IDetectionRunner detectionRunner,
+        ITemplateFileService templateFiles)
     {
         _vision = vision;
         _templates = templates;
@@ -46,6 +56,9 @@ public sealed class HostApi : IDisposable
         _host = host;
         _frameBuffer = frameBuffer;
         _dispatcher = dispatcher;
+        _detectionFiles = detectionFiles;
+        _detectionRunner = detectionRunner;
+        _templateFiles = templateFiles;
     }
 
     // ---------------- Vision ----------------
@@ -98,7 +111,7 @@ public sealed class HostApi : IDisposable
         using var frame = AcquireFrame();
         RegionOfInterest? roi = hasRoi ? new RegionOfInterest(rx, ry, rw, rh) : null;
         var match = _vision.FindFeatures(frame, template,
-            new FeatureMatchOptions(minConfidence, roi, scaleMin, scaleMax, scaleSteps));
+            new VisionFeatureMatchOptions(minConfidence, roi, scaleMin, scaleMax, scaleSteps));
         return match is null ? null : MatchResult.From(match);
     }
 
@@ -269,6 +282,47 @@ public sealed class HostApi : IDisposable
     /// Returns null when nothing is queued.</summary>
     public string? tryDequeueAction() => _dispatcher.TryDequeueInvocation();
 
+    // ---------------- Detection ----------------
+    // Typed, named vision rules persisted at data/profiles/{id}/detections/*.json. The JS-side
+    // stdlib (StdLib.cs InitScript) wraps these into the ergonomic `detect.*` global and applies
+    // the per-definition output bindings (ctx writes / brickbot.emit / overlay payload).
+
+    /// <summary>List of definitions for the active profile, in shape that Jint surfaces directly to JS.
+    /// Cheap to call (file reads are small) — JS-side may cache to skip repeated disk hits.</summary>
+    public DetectionDefinition[] listDetections()
+    {
+        var defs = _detectionFiles.List(_host.ProfileId);
+        var arr = new DetectionDefinition[defs.Count];
+        for (var i = 0; i < defs.Count; i++) arr[i] = defs[i];
+        return arr;
+    }
+
+    /// <summary>Look up one definition by id (the on-disk slug). Returns null when missing.</summary>
+    public DetectionDefinition? getDetection(string id) => _detectionFiles.Get(_host.ProfileId, id);
+
+    /// <summary>Run a single detection by id against the current shared frame.</summary>
+    public DetectionResult runDetection(string id)
+    {
+        _host.EnsureNotCancelled();
+        var def = _detectionFiles.Get(_host.ProfileId, id)
+            ?? throw new Core.Exceptions.OperationException("DETECTION_NOT_FOUND",
+                new() { ["id"] = id });
+        using var frame = AcquireFrame();
+        return _detectionRunner.Run(_host.ProfileId, def, frame);
+    }
+
+    /// <summary>Run an inline definition (used by the editor's live preview when the user hasn't
+    /// saved yet — saves a round trip vs. SAVE → run → DELETE).</summary>
+    public DetectionResult runDetectionDefinition(DetectionDefinition definition)
+    {
+        _host.EnsureNotCancelled();
+        using var frame = AcquireFrame();
+        return _detectionRunner.Run(_host.ProfileId, definition, frame);
+    }
+
+    /// <summary>Drop runner state (effect baselines). Use after the user changes a detection mid-run.</summary>
+    public void resetDetections() => _detectionRunner.Reset();
+
     // ---------------- Internals ----------------
 
     /// <summary>
@@ -282,8 +336,21 @@ public sealed class HostApi : IDisposable
         return snapshot ?? _host.GrabFrame();
     }
 
-    private string ResolveTemplate(string path) =>
-        Path.IsPathRooted(path) ? path : Path.Combine(_host.TemplateRoot, path);
+    /// <summary>
+    /// Resolve a script-side template reference (id or user-friendly name, with or without .png) to
+    /// an absolute path. Absolute paths pass through unchanged. Returns null when neither id nor
+    /// name matches a row — caller should treat that as "missing template".
+    /// </summary>
+    private string ResolveTemplate(string token)
+    {
+        if (Path.IsPathRooted(token)) return token;
+        var resolved = _templateFiles.ResolvePathAsync(_host.ProfileId, token).GetAwaiter().GetResult();
+        if (resolved is not null) return resolved;
+        // Fall back to TemplateRoot/{token}.png so older test fixtures that drop a file straight
+        // into the templates folder (no DB row) still load. Throws via TemplateLoader if missing.
+        var name = token.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? token : token + ".png";
+        return Path.Combine(_host.TemplateRoot, name);
+    }
 
     private static MouseButton ParseButton(string? name) => (name?.ToLowerInvariant()) switch
     {

@@ -8,6 +8,9 @@ namespace BrickBot.Modules.Script.Services;
 /// </summary>
 public interface IScriptHost
 {
+    /// <summary>Active profile id — used to resolve per-profile assets (templates, detections).</summary>
+    string ProfileId { get; }
+
     nint TargetWindowHandle { get; }
     int WindowOriginX { get; }
     int WindowOriginY { get; }

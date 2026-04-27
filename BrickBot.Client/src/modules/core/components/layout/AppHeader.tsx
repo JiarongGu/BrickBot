@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { Layout } from 'antd';
 import {
+  AimOutlined,
   CodeOutlined,
   PlayCircleOutlined,
   SettingOutlined,
@@ -14,7 +15,7 @@ import './AppHeader.css';
 
 const { Header } = Layout;
 
-export type AppTab = 'runner' | 'scripts' | 'tools' | 'settings';
+export type AppTab = 'runner' | 'scripts' | 'detections' | 'tools' | 'settings';
 
 interface TabItem {
   key: AppTab;
@@ -41,6 +42,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({ selectedTab, onTabChange, 
     () => [
       { key: 'runner', icon: <PlayCircleOutlined />, label: t('app.menu.runner') },
       { key: 'scripts', icon: <CodeOutlined />, label: t('app.menu.scripts', 'Scripts') },
+      { key: 'detections', icon: <AimOutlined />, label: t('app.menu.detections', 'Detections') },
       { key: 'tools', icon: <ToolOutlined />, label: t('app.menu.tools', 'Tools') },
       { key: 'settings', icon: <SettingOutlined />, label: t('app.menu.settings') },
     ],

@@ -204,6 +204,13 @@ declare interface BbRunForeverOptions {
   tickMs?: number;
 }
 
+declare interface BbRunForeverOptionsExt extends BbRunForeverOptions {
+  /** Run every enabled detection at the start of each tick before triggers evaluate.
+   *  Detections write to ctx and emit brickbot events per their `output` bindings — so
+   *  triggers downstream see fresh perception state. Default false. */
+  autoDetect?: boolean;
+}
+
 declare interface BbBrickbotApi {
   on(event: 'start' | 'tick' | 'stop', handler: () => void): () => void;
   on(event: 'frame', handler: (payload: BbFramePayload) => void): () => void;
@@ -222,8 +229,112 @@ declare interface BbBrickbotApi {
   when(predicate: () => boolean, action: () => void, opts?: BbTriggerOptions): void;
 
   /** Main loop — tick until cancelled. Pumps a frame, drains UI invocations,
-   *  evaluates triggers, fires 'tick'. Call from main(); blocks until Stop. */
-  runForever(opts?: BbRunForeverOptions): void;
+   *  optionally runs detections, evaluates triggers, fires 'tick'. Call from main();
+   *  blocks until Stop. */
+  runForever(opts?: BbRunForeverOptionsExt): void;
+}
+
+// ----- detect — typed, persisted vision rules -----
+
+declare type BbDetectionKind =
+  | 'template'
+  | 'progressBar'
+  | 'colorPresence'
+  | 'effect'
+  | 'featureMatch';
+
+/**
+ * Color match mode. <c>'rgb'</c> = literal per-channel match (sensitive to lighting).
+ * <c>'hsv'</c> = hue-window match — robust against brightness / color-grading drift.
+ */
+declare type BbColorSpace = 'rgb' | 'hsv';
+
+declare interface BbDetectionDefinition {
+  id: string;
+  name: string;
+  kind: BbDetectionKind;
+  group?: string;
+  enabled: boolean;
+  roi?: BbRect;
+  template?: {
+    templateName: string;
+    minConfidence?: number;
+    scale?: number;
+    grayscale?: boolean;
+    pyramid?: boolean;
+    /** Match in Canny edge space — robust to color drift / lighting / variable fill. */
+    edge?: boolean;
+  };
+  progressBar?: {
+    templateName: string;
+    minConfidence?: number;
+    /** Match the bar bbox by edges instead of pixels — survives saved-template-fill-mismatch. */
+    templateEdge?: boolean;
+    fillColor: BbColor;
+    tolerance?: number;
+    /** Color space for the fill match. HSV preferred when game has bloom / color filters. */
+    colorSpace?: BbColorSpace;
+    insetLeftPct?: number;
+    insetRightPct?: number;
+  };
+  colorPresence?: {
+    color: BbColor;
+    tolerance?: number;
+    minArea?: number;
+    maxResults?: number;
+    colorSpace?: BbColorSpace;
+  };
+  effect?: {
+    threshold?: number;
+    autoBaseline?: boolean;
+    /** Edge-diff vs baseline — flags shape changes, ignores color/lighting drift. */
+    edge?: boolean;
+  };
+  featureMatch?: {
+    templateName: string;
+    minConfidence?: number;
+    scaleMin?: number;
+    scaleMax?: number;
+    scaleSteps?: number;
+    edge?: boolean;
+  };
+  output?: {
+    ctxKey?: string;
+    event?: string;
+    eventOnChangeOnly?: boolean;
+    overlay?: { enabled: boolean; color: string; label?: string };
+  };
+}
+
+declare interface BbDetectionResult {
+  id: string;
+  name: string;
+  kind: BbDetectionKind;
+  found: boolean;
+  durationMs: number;
+  /** Numeric value: 0..1 fill ratio for progressBar / 0..1 diff for effect / blob count for colorPresence. */
+  value?: number;
+  /** True when an effect's diff exceeded its threshold. */
+  triggered?: boolean;
+  match?: BbMatch;
+  /** Discovered fill strip rectangle for progressBar — useful for overlay rendering. */
+  strip?: BbRect;
+  /** Bboxes of color blobs (colorPresence). */
+  blobs?: Array<BbRect & { cx: number; cy: number }>;
+  confidence?: number;
+}
+
+declare interface BbDetectApi {
+  /** Force re-read of definitions from disk + clear effect baselines. */
+  reload(): void;
+  /** All detection definitions for the active profile (cached). */
+  list(): BbDetectionDefinition[];
+  /** Run one detection by id (or name). Applies output bindings (ctx + event). */
+  run(idOrName: string): BbDetectionResult;
+  /** Run every enabled detection. Returns the array of results. */
+  runAll(): BbDetectionResult[];
+  /** Run an in-memory definition without persisting — used by editors for live preview. */
+  test(definition: BbDetectionDefinition): BbDetectionResult;
 }
 
 // ----- Globals (back-compat with the original JS surface) -----
@@ -232,6 +343,7 @@ declare const input: BbInputApi;
 declare const combat: BbCombatApi;
 declare const ctx: BbCtxApi;
 declare const brickbot: BbBrickbotApi;
+declare const detect: BbDetectApi;
 declare function log(message: unknown): void;
 declare function wait(ms: number): void;
 declare function isCancelled(): boolean;
@@ -244,6 +356,7 @@ declare module 'brickbot' {
   export const combat: BbCombatApi;
   export const ctx: BbCtxApi;
   export const brickbot: BbBrickbotApi;
+  export const detect: BbDetectApi;
   export function log(message: unknown): void;
   export function wait(ms: number): void;
   export function isCancelled(): boolean;
@@ -256,6 +369,9 @@ declare module 'brickbot' {
   export type ErrorPayload = BbErrorPayload;
   export type TriggerOptions = BbTriggerOptions;
   export type RunForeverOptions = BbRunForeverOptions;
+  export type DetectionKind = BbDetectionKind;
+  export type DetectionDefinition = BbDetectionDefinition;
+  export type DetectionResult = BbDetectionResult;
 }
 
 // ----- CommonJS shims so transpiled libraries type-check -----

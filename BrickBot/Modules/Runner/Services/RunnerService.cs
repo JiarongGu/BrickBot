@@ -79,6 +79,7 @@ public sealed class RunnerService : IRunnerService
 
             var host = new ScriptHost(
                 _capture,
+                request.ProfileId,
                 window.Handle,
                 window.X,
                 window.Y,

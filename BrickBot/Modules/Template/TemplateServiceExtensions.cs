@@ -10,6 +10,7 @@ public static class TemplateServiceExtensions
 {
     public static IServiceCollection AddTemplateServices(this IServiceCollection services)
     {
+        services.TryAddSingleton<ITemplateRepository, TemplateRepository>();
         services.TryAddSingleton<ITemplateFileService, TemplateFileService>();
         services.TryAddSingleton<TemplateFacade>();
         services.AddFacadeRegistration<TemplateFacade>(ModuleNames.TEMPLATE);

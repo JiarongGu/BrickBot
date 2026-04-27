@@ -36,19 +36,19 @@ public sealed class VisionFacade : BaseFacade
         _payload = payload;
     }
 
-    protected override Task<object?> RouteMessageAsync(IpcRequest request)
+    protected override async Task<object?> RouteMessageAsync(IpcRequest request)
     {
         return request.Type switch
         {
-            "TEST_TEMPLATE" => Task.FromResult<object?>(TestTemplate(request)),
-            "TEST_FIND_COLORS" => Task.FromResult<object?>(TestFindColors(request)),
-            "TEST_PERCENT_BAR" => Task.FromResult<object?>(TestPercentBar(request)),
-            "TEST_BAR_FROM_TEMPLATE" => Task.FromResult<object?>(TestBarFromTemplate(request)),
+            "TEST_TEMPLATE" => await TestTemplateAsync(request).ConfigureAwait(false),
+            "TEST_FIND_COLORS" => TestFindColors(request),
+            "TEST_PERCENT_BAR" => TestPercentBar(request),
+            "TEST_BAR_FROM_TEMPLATE" => await TestBarFromTemplateAsync(request).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Unknown VISION message type: {request.Type}"),
         };
     }
 
-    private object TestTemplate(IpcRequest request)
+    private async Task<object> TestTemplateAsync(IpcRequest request)
     {
         var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
         var templateName = _payload.GetRequiredValue<string>(request.Payload, "templateName");
@@ -58,7 +58,8 @@ public sealed class VisionFacade : BaseFacade
         var scale = _payload.GetOptionalValue<double?>(request.Payload, "scale") ?? 1.0;
 
         using var frame = DecodeFrame(frameBase64);
-        var templatePath = _templateFiles.GetPath(profileId, templateName);
+        var templatePath = await _templateFiles.ResolvePathAsync(profileId, templateName).ConfigureAwait(false)
+            ?? throw new OperationException("TEMPLATE_NOT_FOUND", new() { ["id"] = templateName });
         var template = _templateLoader.Load(templatePath);
 
         var sw = Stopwatch.StartNew();
@@ -134,7 +135,7 @@ public sealed class VisionFacade : BaseFacade
     /// around it. Solves the "template includes padding above/below the actual fill" case
     /// without requiring per-game strip-Y tuning.
     /// </summary>
-    private object TestBarFromTemplate(IpcRequest request)
+    private async Task<object> TestBarFromTemplateAsync(IpcRequest request)
     {
         var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
         var templateName = _payload.GetRequiredValue<string>(request.Payload, "templateName");
@@ -149,7 +150,8 @@ public sealed class VisionFacade : BaseFacade
         var insetRightPct = _payload.GetOptionalValue<double?>(request.Payload, "insetRightPct") ?? 0.18;
 
         using var frame = DecodeFrame(frameBase64);
-        var templatePath = _templateFiles.GetPath(profileId, templateName);
+        var templatePath = await _templateFiles.ResolvePathAsync(profileId, templateName).ConfigureAwait(false)
+            ?? throw new OperationException("TEMPLATE_NOT_FOUND", new() { ["id"] = templateName });
         var template = _templateLoader.Load(templatePath);
 
         var sw = Stopwatch.StartNew();
