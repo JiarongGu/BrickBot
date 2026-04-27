@@ -37,7 +37,10 @@ public sealed class CaptureFacade : BaseFacade
     private object GrabPng(IpcRequest request)
     {
         var handle = (nint)_payload.GetRequiredValue<long>(request.Payload, "windowHandle");
-        var result = _screenshots.GrabPng(handle);
+        // Optional cap on the longest side. Frontend defaults to 1920 so 4K monitors don't
+        // ship 25MB PNG payloads on every preview grab. Pass 0 / omit for full resolution.
+        var maxDimension = _payload.GetOptionalValue<int?>(request.Payload, "maxDimension") ?? 0;
+        var result = _screenshots.GrabPng(handle, maxDimension);
         return new
         {
             pngBase64 = Convert.ToBase64String(result.PngBytes),

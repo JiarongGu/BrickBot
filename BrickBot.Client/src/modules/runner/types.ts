@@ -16,6 +16,7 @@ export interface WindowInfo {
   handle: number;
   title: string;
   processName: string;
+  className: string;
   x: number;
   y: number;
   width: number;

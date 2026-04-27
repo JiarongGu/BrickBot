@@ -14,7 +14,7 @@ public sealed class ScreenshotService : IScreenshotService
         _windowFinder = windowFinder;
     }
 
-    public ScreenshotResult GrabPng(nint windowHandle)
+    public ScreenshotResult GrabPng(nint windowHandle, int maxDimension = 0)
     {
         if (windowHandle == nint.Zero)
         {
@@ -29,13 +29,36 @@ public sealed class ScreenshotService : IScreenshotService
         }
 
         using var frame = _capture.Grab(windowHandle);
+        var image = frame.Image;
+        Mat? scaled = null;
 
-        // OpenCV captures BGR; PNG encoder handles channel order. Default compression level (3).
-        if (!Cv2.ImEncode(".png", frame.Image, out var bytes))
+        try
         {
-            throw new OperationException("CAPTURE_ENCODE_FAILED");
-        }
+            // Optional uniform downscale when the longest side exceeds the cap. Keeps the
+            // PNG payload + frontend canvas paint cheap on 4K monitors. INTER_AREA is the
+            // right kernel for shrinking.
+            if (maxDimension > 0)
+            {
+                var longest = Math.Max(frame.Width, frame.Height);
+                if (longest > maxDimension)
+                {
+                    var scale = (double)maxDimension / longest;
+                    scaled = new Mat();
+                    Cv2.Resize(image, scaled, new OpenCvSharp.Size(0, 0), scale, scale, InterpolationFlags.Area);
+                    image = scaled;
+                }
+            }
 
-        return new ScreenshotResult(bytes, frame.Width, frame.Height);
+            if (!Cv2.ImEncode(".png", image, out var bytes))
+            {
+                throw new OperationException("CAPTURE_ENCODE_FAILED");
+            }
+
+            return new ScreenshotResult(bytes, image.Width, image.Height);
+        }
+        finally
+        {
+            scaled?.Dispose();
+        }
     }
 }

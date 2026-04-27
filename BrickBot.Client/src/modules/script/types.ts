@@ -6,3 +6,10 @@ export interface ScriptFileInfo {
   kind: ScriptKind;
   name: string;
 }
+
+export interface ScriptDiagnostic {
+  message: string;
+  line: number;
+  column: number;
+  severity: 'error' | 'warning';
+}

@@ -11,7 +11,11 @@ public static class CaptureServiceExtensions
     public static IServiceCollection AddCaptureServices(this IServiceCollection services)
     {
         services.TryAddSingleton<IWindowFinder, WindowFinder>();
-        services.TryAddSingleton<ICaptureService, BitBltCaptureService>();
+        // BitBltCaptureService is registered as a concrete fallback so WinRtCaptureService
+        // can inject it directly. ICaptureService is the WinRT-primary path that owns the
+        // fallback decision (see WinRtCaptureService for the routing rules).
+        services.TryAddSingleton<BitBltCaptureService>();
+        services.TryAddSingleton<ICaptureService, WinRtCaptureService>();
         services.TryAddSingleton<IFrameBuffer, FrameBuffer>();
         services.TryAddSingleton<IScreenshotService, ScreenshotService>();
         services.TryAddSingleton<CaptureFacade>();

@@ -25,4 +25,10 @@
     <ProjectReference Include="..\BrickBot\BrickBot.csproj" />
   </ItemGroup>
 
+  <!-- Real game frames for vision integration tests. Files are NOT committed
+       (gitignored) — tests skip gracefully when TestData/ is empty. -->
+  <ItemGroup>
+    <None Include="TestData\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

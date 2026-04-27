@@ -4,44 +4,11 @@ using BrickBot.Modules.Core.Services;
 
 namespace BrickBot.Modules.Script.Services;
 
-/// <summary>
-/// CRUD over the per-profile scripts directory at <c>data/profiles/{id}/scripts/</c>.
-/// Two well-known subfolders:
-///   - <c>main/</c>   — top-level orchestrator scripts. Runner picks one to execute.
-///   - <c>library/</c> — helpers, monitors, skill defs. Pre-loaded into the engine before main.
-/// File names are validated to prevent path traversal.
-/// </summary>
-public interface IScriptFileService
-{
-    /// <summary>List every .js file across both kinds for the given profile.</summary>
-    IReadOnlyList<ScriptFileInfo> List(string profileId);
-
-    /// <summary>Read script source. Throws SCRIPT_FILE_NOT_FOUND if missing.</summary>
-    string Read(string profileId, ScriptKind kind, string name);
-
-    /// <summary>Create or overwrite a script file. Returns the resulting absolute path.</summary>
-    string Save(string profileId, ScriptKind kind, string name, string source);
-
-    /// <summary>Remove a script file. No-op if it doesn't exist.</summary>
-    void Delete(string profileId, ScriptKind kind, string name);
-
-    /// <summary>Returns sources of every library script, alphabetical by name.</summary>
-    IReadOnlyList<ScriptFile> LoadLibraries(string profileId);
-
-    /// <summary>Returns the source of a specific main script. Throws if missing.</summary>
-    string LoadMain(string profileId, string mainName);
-}
-
-public enum ScriptKind
-{
-    Main,
-    Library,
-}
-
-public sealed record ScriptFileInfo(ScriptKind Kind, string Name, string Path);
-
 public sealed class ScriptFileService : IScriptFileService
 {
+    private const string SourceExt = ".ts";
+    private const string CompiledExt = ".js";
+
     private readonly IGlobalPathService _globalPaths;
     private readonly ILogHelper _logger;
 
@@ -59,53 +26,71 @@ public sealed class ScriptFileService : IScriptFileService
         return result;
     }
 
-    public string Read(string profileId, ScriptKind kind, string name)
+    public string ReadSource(string profileId, ScriptKind kind, string name)
     {
-        var path = ResolvePath(profileId, kind, name, ensureExists: true);
+        var path = ResolvePath(profileId, kind, name, SourceExt, ensureExists: true);
         return File.ReadAllText(path);
     }
 
-    public string Save(string profileId, ScriptKind kind, string name, string source)
+    public string Save(string profileId, ScriptKind kind, string name, string tsSource, string jsSource)
     {
-        var path = ResolvePath(profileId, kind, name, ensureExists: false);
-        var dir = Path.GetDirectoryName(path)!;
+        var tsPath = ResolvePath(profileId, kind, name, SourceExt, ensureExists: false);
+        var jsPath = ResolvePath(profileId, kind, name, CompiledExt, ensureExists: false);
+        var dir = Path.GetDirectoryName(tsPath)!;
         Directory.CreateDirectory(dir);
-        File.WriteAllText(path, source);
+        File.WriteAllText(tsPath, tsSource);
+        File.WriteAllText(jsPath, jsSource);
         _logger.Info($"Saved script {kind.ToString().ToLowerInvariant()}/{name} for profile {profileId}", "Script");
-        return path;
+        return tsPath;
     }
 
     public void Delete(string profileId, ScriptKind kind, string name)
     {
-        var path = ResolvePath(profileId, kind, name, ensureExists: false);
-        if (File.Exists(path))
+        var tsPath = ResolvePath(profileId, kind, name, SourceExt, ensureExists: false);
+        var jsPath = ResolvePath(profileId, kind, name, CompiledExt, ensureExists: false);
+        var deletedAny = false;
+        if (File.Exists(tsPath)) { File.Delete(tsPath); deletedAny = true; }
+        if (File.Exists(jsPath)) { File.Delete(jsPath); deletedAny = true; }
+        if (deletedAny)
         {
-            File.Delete(path);
             _logger.Info($"Deleted script {kind.ToString().ToLowerInvariant()}/{name} for profile {profileId}", "Script");
         }
     }
 
-    public IReadOnlyList<ScriptFile> LoadLibraries(string profileId)
+    public string LoadCompiledMain(string profileId, string mainName)
+    {
+        var jsPath = ResolvePath(profileId, ScriptKind.Main, mainName, CompiledExt, ensureExists: false);
+        if (!File.Exists(jsPath))
+        {
+            throw new OperationException("SCRIPT_NOT_COMPILED",
+                new() { ["kind"] = "main", ["name"] = mainName });
+        }
+        return File.ReadAllText(jsPath);
+    }
+
+    public ScriptFile? LoadCompiledLibrary(string profileId, string libraryName)
+    {
+        ValidateName(libraryName);
+        var jsPath = ResolvePath(profileId, ScriptKind.Library, libraryName, CompiledExt, ensureExists: false);
+        if (!File.Exists(jsPath)) return null;
+        return new ScriptFile(libraryName, File.ReadAllText(jsPath));
+    }
+
+    public IReadOnlyList<string> ListCompiledLibraries(string profileId)
     {
         var dir = KindDirectory(profileId, ScriptKind.Library);
-        if (!Directory.Exists(dir)) return Array.Empty<ScriptFile>();
-
-        return Directory.EnumerateFiles(dir, "*.js")
-            .OrderBy(p => Path.GetFileName(p), StringComparer.OrdinalIgnoreCase)
-            .Select(p => new ScriptFile(Path.GetFileNameWithoutExtension(p), File.ReadAllText(p)))
+        if (!Directory.Exists(dir)) return Array.Empty<string>();
+        return Directory.EnumerateFiles(dir, $"*{CompiledExt}")
+            .Select(p => Path.GetFileNameWithoutExtension(p))
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
-    public string LoadMain(string profileId, string mainName)
-    {
-        var path = ResolvePath(profileId, ScriptKind.Main, mainName, ensureExists: true);
-        return File.ReadAllText(path);
-    }
-
-    private string ResolvePath(string profileId, ScriptKind kind, string name, bool ensureExists)
+    private string ResolvePath(string profileId, ScriptKind kind, string name, string ext, bool ensureExists)
     {
         ValidateName(name);
-        var fileName = name.EndsWith(".js", StringComparison.OrdinalIgnoreCase) ? name : $"{name}.js";
+        var bare = StripKnownExtensions(name);
+        var fileName = $"{bare}{ext}";
         var path = Path.Combine(KindDirectory(profileId, kind), fileName);
 
         if (ensureExists && !File.Exists(path))
@@ -125,10 +110,17 @@ public sealed class ScriptFileService : IScriptFileService
         var dir = KindDirectory(profileId, kind);
         if (!Directory.Exists(dir)) return Array.Empty<ScriptFileInfo>();
 
-        return Directory.EnumerateFiles(dir, "*.js")
+        return Directory.EnumerateFiles(dir, $"*{SourceExt}")
             .OrderBy(p => Path.GetFileName(p), StringComparer.OrdinalIgnoreCase)
             .Select(p => new ScriptFileInfo(kind, Path.GetFileNameWithoutExtension(p), p))
             .ToList();
+    }
+
+    private static string StripKnownExtensions(string name)
+    {
+        if (name.EndsWith(SourceExt, StringComparison.OrdinalIgnoreCase)) return name[..^SourceExt.Length];
+        if (name.EndsWith(CompiledExt, StringComparison.OrdinalIgnoreCase)) return name[..^CompiledExt.Length];
+        return name;
     }
 
     private static void ValidateName(string name)
@@ -137,8 +129,9 @@ public sealed class ScriptFileService : IScriptFileService
             throw new OperationException("SCRIPT_NAME_REQUIRED");
 
         var invalid = Path.GetInvalidFileNameChars();
-        if (name.Any(c => invalid.Contains(c)) ||
-            name.Contains("..") || name.Contains('/') || name.Contains('\\'))
+        var bare = StripKnownExtensions(name);
+        if (bare.Any(c => invalid.Contains(c)) ||
+            bare.Contains("..") || bare.Contains('/') || bare.Contains('\\'))
         {
             throw new OperationException("SCRIPT_INVALID_NAME", new() { ["name"] = name });
         }

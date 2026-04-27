@@ -10,8 +10,10 @@ public static class ScriptServiceExtensions
 {
     public static IServiceCollection AddScriptServices(this IServiceCollection services)
     {
+        services.TryAddSingleton<IScriptDispatcher, ScriptDispatcher>();
         services.TryAddSingleton<IScriptEngine, JintScriptEngine>();
         services.TryAddSingleton<IScriptFileService, ScriptFileService>();
+        services.TryAddSingleton<IScriptTypingsProvider, ScriptTypingsProvider>();
         services.TryAddSingleton<ScriptFacade>();
         services.AddFacadeRegistration<ScriptFacade>(ModuleNames.SCRIPT);
         return services;

@@ -6,19 +6,27 @@ namespace BrickBot.Modules.Script;
 
 /// <summary>
 /// IPC for managing script files (Main + Library) inside the active profile's scripts/ folder.
-/// Types: LIST, GET, SAVE, DELETE.
+/// Types: LIST, GET, SAVE, DELETE, GET_TYPES.
+///
+/// SAVE expects both the TypeScript source-of-truth and its frontend-compiled JS output —
+/// the runner only ever executes the compiled .js, so a save without the .js sidecar would
+/// leave the script unrunnable. GET returns just the .ts source for the editor.
+/// GET_TYPES returns the embedded brickbot.d.ts so Monaco can offer autocomplete.
 /// </summary>
 public sealed class ScriptFacade : BaseFacade
 {
     private readonly IScriptFileService _files;
+    private readonly IScriptTypingsProvider _typings;
     private readonly PayloadHelper _payload;
 
     public ScriptFacade(
         IScriptFileService files,
+        IScriptTypingsProvider typings,
         PayloadHelper payload,
         ILogger<ScriptFacade> logger) : base(logger)
     {
         _files = files;
+        _typings = typings;
         _payload = payload;
     }
 
@@ -30,6 +38,7 @@ public sealed class ScriptFacade : BaseFacade
             "GET" => Task.FromResult<object?>(Get(request)),
             "SAVE" => Task.FromResult<object?>(Save(request)),
             "DELETE" => Task.FromResult<object?>(Delete(request)),
+            "GET_TYPES" => Task.FromResult<object?>(GetTypes()),
             _ => throw new InvalidOperationException($"Unknown SCRIPT message type: {request.Type}"),
         };
     }
@@ -48,7 +57,7 @@ public sealed class ScriptFacade : BaseFacade
         var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
         var kind = ParseKind(_payload.GetRequiredValue<string>(request.Payload, "kind"));
         var name = _payload.GetRequiredValue<string>(request.Payload, "name");
-        return new { source = _files.Read(profileId, kind, name) };
+        return new { source = _files.ReadSource(profileId, kind, name) };
     }
 
     private object Save(IpcRequest request)
@@ -56,8 +65,9 @@ public sealed class ScriptFacade : BaseFacade
         var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
         var kind = ParseKind(_payload.GetRequiredValue<string>(request.Payload, "kind"));
         var name = _payload.GetRequiredValue<string>(request.Payload, "name");
-        var source = _payload.GetRequiredValue<string>(request.Payload, "source");
-        var path = _files.Save(profileId, kind, name, source);
+        var tsSource = _payload.GetRequiredValue<string>(request.Payload, "tsSource");
+        var jsSource = _payload.GetRequiredValue<string>(request.Payload, "jsSource");
+        var path = _files.Save(profileId, kind, name, tsSource, jsSource);
         return new { success = true, path };
     }
 
@@ -68,6 +78,11 @@ public sealed class ScriptFacade : BaseFacade
         var name = _payload.GetRequiredValue<string>(request.Payload, "name");
         _files.Delete(profileId, kind, name);
         return new { success = true };
+    }
+
+    private object GetTypes()
+    {
+        return new { source = _typings.GetGlobalTypings() };
     }
 
     private static ScriptKind ParseKind(string raw) => raw.ToLowerInvariant() switch

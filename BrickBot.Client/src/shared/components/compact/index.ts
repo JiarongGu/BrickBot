@@ -45,3 +45,6 @@ export type { CompactSelectProps, CompactSelectSize } from './CompactSelect';
 
 export { CompactSwitch } from './CompactSwitch';
 export type { CompactSwitchProps } from './CompactSwitch';
+
+export { CompactSegmented } from './CompactSegmented';
+export type { CompactSegmentedProps } from './CompactSegmented';

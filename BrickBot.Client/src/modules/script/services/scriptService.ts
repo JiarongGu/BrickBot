@@ -14,12 +14,27 @@ class ScriptService extends BaseModuleService {
     return this.send('GET', { profileId, kind, name });
   }
 
-  save(profileId: string, kind: ScriptKind, name: string, source: string): Promise<{ success: boolean; path: string }> {
-    return this.send('SAVE', { profileId, kind, name, source });
+  /**
+   * Persist a script. The frontend transpiles TypeScript → CommonJS JavaScript before
+   * sending; the backend stores both files side-by-side and the runner executes the .js.
+   */
+  save(
+    profileId: string,
+    kind: ScriptKind,
+    name: string,
+    tsSource: string,
+    jsSource: string,
+  ): Promise<{ success: boolean; path: string }> {
+    return this.send('SAVE', { profileId, kind, name, tsSource, jsSource });
   }
 
   delete(profileId: string, kind: ScriptKind, name: string): Promise<{ success: boolean }> {
     return this.send('DELETE', { profileId, kind, name });
+  }
+
+  /** Returns the embedded brickbot.d.ts so Monaco can offer host-API autocomplete. */
+  getTypes(): Promise<{ source: string }> {
+    return this.send('GET_TYPES');
   }
 }
 

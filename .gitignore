@@ -45,3 +45,7 @@ out/
 .env.test.local
 .env.production.local
 BrickBot/wwwroot/
+
+# Test data — game frames are too large to commit; drop locally only.
+BrickBot.Tests/TestData/*.png
+BrickBot.Tests/TestData/*.jpg

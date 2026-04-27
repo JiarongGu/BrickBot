@@ -1,24 +1,39 @@
 .capture-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   height: 100%;
   padding: 12px;
 }
 
-.capture-panel__controls {
+/* Top capture bar + secondary insert toolbar form one cohesive block. Shared border
+   so they read as a single grouping; secondary bar drops the top border to merge. */
+.capture-panel__bar {
   flex-shrink: 0;
+  background: var(--color-card-bg);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-base) var(--border-radius-base) 0 0;
+  padding: 6px 10px;
+}
+
+.capture-panel__bar--secondary {
+  background: var(--color-bg-elevated);
+  border-top: none;
+  border-radius: 0 0 var(--border-radius-base) var(--border-radius-base);
+  margin-top: -8px; /* compensate for parent's 8px gap so bars stack as one block */
+  margin-bottom: 0;
 }
 
 .capture-panel__grid {
   display: grid;
-  grid-template-columns: 1fr 240px;
+  grid-template-columns: 1fr 320px;
   gap: 12px;
   flex: 1;
   min-height: 0;
 }
 
 .capture-panel__canvas-wrap {
+  position: relative;
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-secondary);
   border-radius: var(--border-radius-base);
@@ -28,6 +43,29 @@
   justify-content: center;
   padding: 8px;
 }
+
+.capture-panel__hud {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-end;
+}
+
+.capture-panel__hud-row {
+  font-size: 12px;
+  font-family: source-code-pro, Menlo, Monaco, Consolas, monospace;
+  background: rgba(0, 0, 0, 0.6);
+  color: #ffffff;
+  padding: 2px 8px;
+  border-radius: var(--border-radius-sm);
+}
+
+.capture-panel__hud-row--crop { background: rgba(24, 144, 255, 0.85); }
+.capture-panel__hud-row--hint { background: rgba(0, 0, 0, 0.4); font-family: inherit; }
 
 .capture-panel__canvas {
   /* Display at native pixel ratio when possible; let browser scale down if larger than viewport. */
@@ -41,6 +79,42 @@
 .capture-panel__sidebar {
   height: 100%;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Cards inside the sidebar use uniform 8px gap from the flex container; cancel any
+   per-card marginTop a child component might inject. */
+.capture-panel__sidebar > * { margin-top: 0 !important; }
+
+.capture-panel__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px;
+  color: var(--color-text-secondary);
+}
+
+.capture-panel__empty-icon {
+  font-size: 32px;
+  color: var(--color-text-tertiary);
+}
+
+.capture-panel__empty-title {
+  font-size: 14px;
+  color: var(--color-text-base);
+}
+
+.capture-panel__empty-hint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.capture-panel__detect-actions {
+  margin-top: 8px;
 }
 
 .capture-panel__empty-text {
@@ -51,6 +125,55 @@
 }
 
 .capture-panel__template-name {
-  font-size: 13px;
+  font-size: 12px;
   font-family: source-code-pro, Menlo, Monaco, Consolas, monospace;
 }
+
+.capture-panel__detect-row {
+  margin-bottom: 6px;
+}
+
+.capture-panel__detect-row:last-child {
+  margin-bottom: 0;
+}
+
+/* Tighter slider — antd default leaves big top/bottom gap; we manage spacing externally. */
+.capture-panel__detect-row .ant-slider {
+  margin: 4px 4px;
+}
+
+.capture-panel__detect-label {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
+}
+
+.capture-panel__inline-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.capture-panel__color-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Prevent any wide popover-trigger / hint text from pushing the row past the card. */
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.capture-panel__color-hint {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.capture-panel__detect-row--color { margin-bottom: 12px; }

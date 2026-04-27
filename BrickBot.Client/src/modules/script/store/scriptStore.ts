@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { ScriptFileInfo, ScriptKind } from '../types';
+import type { ScriptDiagnostic, ScriptFileInfo, ScriptKind } from '../types';
 
 interface SelectedScript {
   kind: ScriptKind;
@@ -8,6 +8,8 @@ interface SelectedScript {
   source: string;
   /** dirty = unsaved local edits since the last load/save */
   dirty: boolean;
+  /** Most recent compile diagnostics for the selected script (from Monaco's TS worker). */
+  diagnostics: ScriptDiagnostic[];
 }
 
 interface ScriptStoreState {
@@ -20,6 +22,7 @@ interface ScriptStoreActions {
   setFiles: (files: ScriptFileInfo[]) => void;
   setSelected: (selected: SelectedScript | undefined) => void;
   setSource: (source: string) => void;
+  setDiagnostics: (diagnostics: ScriptDiagnostic[]) => void;
   markSaved: () => void;
   setLoading: (loading: boolean) => void;
 }
@@ -39,6 +42,10 @@ export const useScriptStore = create<ScriptStoreState & ScriptStoreActions>()(
         s.selected.source = source;
         s.selected.dirty = true;
       }
+    }),
+
+    setDiagnostics: (diagnostics) => set((s) => {
+      if (s.selected) s.selected.diagnostics = diagnostics;
     }),
 
     markSaved: () => set((s) => { if (s.selected) s.selected.dirty = false; }),

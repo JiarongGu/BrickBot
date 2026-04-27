@@ -38,14 +38,16 @@ Original rationale (kept for history):
 **Date:** 2026-04-27
 **Status:** Accepted
 
-**Primary:** `Windows.Graphics.Capture` (WinRT API). Hardware-accelerated, supports DirectX games, hits 60+ FPS.
-**Fallback:** `BitBlt` for windowed/GDI games where WinRT capture is blocked or unavailable.
+**Primary:** `Windows.Graphics.Capture` (WinRT). Reads the target window's framebuffer directly through DWM, so capture is unaffected by occluding windows, works for GPU-composited / DirectX-windowed apps, and never leaks desktop-wallpaper redirection bitmaps. Implemented in `WinRtCaptureService` with raw COM/D3D11 interop (no SharpDX/Vortice dep). Per-window cached `Direct3D11CaptureFramePool` + `GraphicsCaptureSession`; reuses across `Grab()` calls.
+**Fallback:** `BitBltCaptureService` (PrintWindow with `PW_CLIENTONLY | PW_RENDERFULLCONTENT` + screen-DC BitBlt) for Windows < 10 1809 or apps that opt out of WinRT capture via `WDA_EXCLUDEFROMCAPTURE`.
 
 The capture pipeline exposes a **shared frame buffer** (single-writer, multi-reader, frame counter) that vision modules read at any frame. Capture rate is decoupled from script tick rate so vision can sample frames as fast as needed without blocking script execution.
 
 Configurable target FPS (30 / 60 / 120).
 
-**Why:** User's forward requirement is action-game support, which BitBlt alone can't deliver. WinRT is the modern, hardware-accelerated path; BitBlt fallback covers edge cases.
+**Why:** User's forward requirement is action-game support. WinRT GraphicsCapture is the only path that captures occluded / GPU-composited windows reliably. BitBlt-from-window-DC was leaking cached desktop pixels for any DWM-redirected window — that's why earlier capture attempts showed wallpaper instead of the target. Two strategies inside the GDI fallback (PrintWindow + screen-region BitBlt) cover the legacy paths without that bug.
+
+**How to apply:** New host primitive that needs current-frame access — go through `IFrameBuffer.Snapshot()` from the script tick loop (already pumped via `host.pumpFrame()`). Don't call `ICaptureService.Grab` from inside vision ops; the frame buffer is the choke point. To opt a frame source out of the WinRT path (e.g. for testing), inject `BitBltCaptureService` directly — it's still a registered concrete service.
 
 ---
 
@@ -150,10 +152,13 @@ Embedded scripting language is **JavaScript**, evaluated by [Jint](https://githu
 - Surfaced two ways: Drawer button on the Scripts editor toolbar (mid-edit authoring) and "Captures" sub-tab on the Tools tab (standalone).
 
 **How to apply:**
-- Adding new host primitives: extend `HostApi.cs` (camelCase methods), then expose/wrap in InitScript. Don't expose `__host` directly to user scripts.
+- Adding new host primitives: extend `HostApi.cs` (camelCase methods), then expose/wrap in InitScript. Don't expose `__host` directly to user scripts. **Also update `Modules/Script/Resources/brickbot.d.ts`** so Monaco offers autocomplete for the new symbol.
 - Adding combat patterns: extend CombatScript. Behavior trees compose cleanly — prefer adding a new composite/decorator to writing imperative helpers.
 - Adding shared-state shapes: just `ctx.set(key, value)` — no schema needed; values are JSON-serializable. If a key needs to be discoverable by other scripts, document the convention in `library/<thing>.js` near where it's set.
-- TypeScript not supported (Jint is JS-only). If we want autocomplete in Monaco later, ship a `.d.ts` for the JS surface — no C# changes required.
+
+**Authoring language (updated 2026-04-27 follow-up — supersedes "TypeScript not supported"):** scripts are now authored in **TypeScript**. Frontend transpiles via Monaco's bundled TS language service (`module: CommonJS`, `target: ES2020`); backend `ScriptFacade.SAVE` accepts both `tsSource` + `jsSource`, `ScriptFileService` writes them side-by-side. Runner only ever loads the compiled `.js`. Library imports work via `require()`/CommonJS — `JintScriptEngine` installs a `require` global that resolves `'brickbot'` to a synthetic host module and every other id to a profile library through a `LibraryResolver` callback. Libraries are loaded lazily (on first `require`), no longer alphabetically pre-loaded. See `.claude/rules/script-save-chain.md` for the full wiring chain.
+
+**Event / action / trigger surface (added 2026-04-27 follow-up):** `brickbot.{on, off, emit, action, invoke, listActions, when, runForever}` exposes a single-threaded JS event bus + named-action registry + declarative trigger model. `brickbot.runForever({ tickMs })` is the new main loop — each tick pumps a frame into the shared `IFrameBuffer`, drains queued action invocations from the UI (via `IScriptDispatcher`), evaluates registered triggers, fires `'tick'`. Built-in events: `start`, `frame`, `tick`, `stop`, `error`. Action invocation crosses threads through `IScriptDispatcher` (lock-free queue) — UI calls `RUNNER.INVOKE_ACTION` → dispatcher.Enqueue → engine tick dequeues → `brickbot.invoke(name)`. Push event `SCRIPT.ACTIONS_CHANGED` keeps the UI's Tools tab in sync without polling. `vision.*` reads from the buffered frame when a tick has pumped one (consistent within a tick), falls back to on-demand `Grab` for legacy procedural mains.
 
 ---
 

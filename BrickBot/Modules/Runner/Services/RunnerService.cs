@@ -5,6 +5,7 @@ using BrickBot.Modules.Core.Exceptions;
 using BrickBot.Modules.Runner.Models;
 using BrickBot.Modules.Script.Services;
 using Microsoft.Extensions.Logging;
+using System.Collections.Generic;
 
 namespace BrickBot.Modules.Runner.Services;
 
@@ -14,6 +15,7 @@ public sealed class RunnerService : IRunnerService
     private readonly IWindowFinder _windowFinder;
     private readonly IScriptEngine _scriptEngine;
     private readonly IScriptFileService _scriptFiles;
+    private readonly IScriptDispatcher _dispatcher;
     private readonly IRunLog _log;
     private readonly IProfileEventBus _eventBus;
     private readonly ILogger<RunnerService> _logger;
@@ -28,6 +30,7 @@ public sealed class RunnerService : IRunnerService
         IWindowFinder windowFinder,
         IScriptEngine scriptEngine,
         IScriptFileService scriptFiles,
+        IScriptDispatcher dispatcher,
         IRunLog log,
         IProfileEventBus eventBus,
         ILogger<RunnerService> logger)
@@ -36,10 +39,15 @@ public sealed class RunnerService : IRunnerService
         _windowFinder = windowFinder;
         _scriptEngine = scriptEngine;
         _scriptFiles = scriptFiles;
+        _dispatcher = dispatcher;
         _log = log;
         _eventBus = eventBus;
         _logger = logger;
     }
+
+    public IReadOnlyList<string> ListActions() => _dispatcher.GetRegisteredActions();
+
+    public void InvokeAction(string actionName) => _dispatcher.EnqueueInvocation(actionName);
 
     public RunnerState State { get { lock (_lock) return _state; } }
 
@@ -55,10 +63,16 @@ public sealed class RunnerService : IRunnerService
             var window = _windowFinder.GetByHandle(request.WindowHandle)
                 ?? throw new OperationException("RUNNER_WINDOW_NOT_FOUND");
 
-            // Resolve scripts BEFORE we mark the run as started so a missing main fails fast.
-            var libraries = _scriptFiles.LoadLibraries(request.ProfileId);
-            var mainSource = _scriptFiles.LoadMain(request.ProfileId, request.MainName);
-            var run = new ScriptRunRequest(mainSource, libraries);
+            // Resolve the compiled main BEFORE we mark the run as started so a missing
+            // or uncompiled main fails fast. Libraries resolve lazily via require() so
+            // we don't pay the load cost for libraries the script never imports.
+            var mainSource = _scriptFiles.LoadCompiledMain(request.ProfileId, request.MainName);
+            var profileId = request.ProfileId;
+            var run = new ScriptRunRequest(
+                mainSource,
+                libName => _scriptFiles.LoadCompiledLibrary(profileId, libName));
+
+            var availableLibraries = _scriptFiles.ListCompiledLibraries(profileId);
 
             _cts = new CancellationTokenSource();
             var ct = _cts.Token;
@@ -73,8 +87,12 @@ public sealed class RunnerService : IRunnerService
 
             var context = new ScriptContext();
 
+            // Reset dispatcher state from any previous Run before the new engine boots
+            // so stale registered actions / queued invocations never leak across runs.
+            _dispatcher.Reset();
+
             UpdateState(new RunnerState(RunnerStatus.Running));
-            _log.Info($"Run started against \"{window.Title}\" ({window.Width}x{window.Height}) — main: {request.MainName}, libraries: {libraries.Count}");
+            _log.Info($"Run started against \"{window.Title}\" ({window.Width}x{window.Height}) — main: {request.MainName}, libraries available: {availableLibraries.Count}");
 
             _thread = new Thread(() => RunLoop(host, run, context, ct))
             {
@@ -122,6 +140,12 @@ public sealed class RunnerService : IRunnerService
             _logger.LogError(ex, "Unhandled run failure");
             _log.Error(ex.Message);
             UpdateState(new RunnerState(RunnerStatus.Faulted, ex.Message));
+        }
+        finally
+        {
+            // Clear dispatcher state so the UI's Actions panel updates back to empty
+            // even when a faulted run leaves stale registrations behind.
+            _dispatcher.Reset();
         }
     }
 

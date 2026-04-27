@@ -2,14 +2,14 @@ namespace BrickBot.Modules.Script.Services;
 
 /// <summary>
 /// Inlined BrickBot script stdlib. Two scripts run before the user's code each Run:
-///   - <see cref="InitScript"/> wraps <c>__host</c> into the ergonomic top-level globals.
+///   - <see cref="InitScript"/> wraps <c>__host</c> into the ergonomic top-level globals
+///     plus the <c>brickbot</c> event-bus / action-registry / trigger API + tick loop.
 ///   - <see cref="CombatScript"/> ships behavior-tree primitives + helpers under <c>combat.*</c>.
 /// </summary>
 internal static class StdLib
 {
     /// <summary>
-    /// Defines the user-facing globals: vision, input, log, wait, isCancelled, now, ctx.
-    /// All shape conventions here MUST match what the engine docs / examples rely on.
+    /// Defines the user-facing globals: vision, input, log, wait, isCancelled, now, ctx, brickbot.
     /// </summary>
     public const string InitScript = """
 (function () {
@@ -27,22 +27,103 @@ internal static class StdLib
     find(templatePath, opts) {
       opts = opts || {};
       const conf = (opts.minConfidence != null) ? opts.minConfidence : 0.85;
+      const scale = (opts.scale != null) ? opts.scale : 1.0;
+      const gray = !!opts.grayscale;
+      const pyramid = !!opts.pyramid;
       if (opts.roi) {
         const r = opts.roi;
-        return host.findTemplateRoi(templatePath, conf, r.x | 0, r.y | 0, r.w | 0, r.h | 0);
+        return host.findTemplateRoi(templatePath, conf, r.x | 0, r.y | 0, r.w | 0, r.h | 0, scale, gray, pyramid);
       }
-      return host.findTemplate(templatePath, conf);
+      return host.findTemplate(templatePath, conf, scale, gray, pyramid);
     },
 
     /** Poll for a template until found or timeout (ms). Returns null on timeout. */
     waitFor(templatePath, timeoutMs, opts) {
       opts = opts || {};
       const conf = (opts.minConfidence != null) ? opts.minConfidence : 0.85;
-      return host.waitForTemplate(templatePath, timeoutMs | 0, conf);
+      const scale = (opts.scale != null) ? opts.scale : 1.0;
+      const gray = !!opts.grayscale;
+      const pyramid = !!opts.pyramid;
+      return host.waitForTemplate(templatePath, timeoutMs | 0, conf, scale, gray, pyramid);
+    },
+
+    /**
+     * Scale-invariant template match. Tries scaleSteps scales between scaleMin..scaleMax
+     * and returns the best. Solves "icon scaled because resolution changed" without ORB's
+     * native-feature-extractor dep. Combine with a tight roi to keep total cost low.
+     * @param {string} templatePath
+     * @param {{ minConfidence?: number, scaleMin?: number, scaleMax?: number, scaleSteps?: number, roi?: {x,y,w,h} }=} opts
+     */
+    findFeatures(templatePath, opts) {
+      opts = opts || {};
+      const conf = (opts.minConfidence != null) ? opts.minConfidence : 0.80;
+      const sMin = (opts.scaleMin != null) ? opts.scaleMin : 0.9;
+      const sMax = (opts.scaleMax != null) ? opts.scaleMax : 1.1;
+      const sSteps = (opts.scaleSteps != null) ? (opts.scaleSteps | 0) : 3;
+      if (opts.roi) {
+        const r = opts.roi;
+        return host.findFeatures(templatePath, conf, sMin, sMax, sSteps, true, r.x | 0, r.y | 0, r.w | 0, r.h | 0);
+      }
+      return host.findFeatures(templatePath, conf, sMin, sMax, sSteps, false, 0, 0, 0, 0);
+    },
+
+    /**
+     * Find blobs of a color range. Returns array of {x,y,w,h,area,cx,cy} sorted by area desc.
+     * Order of magnitude faster than template matching for distinctly-colored elements.
+     * @param {{ rMin,rMax,gMin,gMax,bMin,bMax }} range
+     * @param {{ roi?, minArea?: number, maxResults?: number }=} opts
+     */
+    findColors(range, opts) {
+      opts = opts || {};
+      const minArea = (opts.minArea != null) ? (opts.minArea | 0) : 25;
+      const maxResults = (opts.maxResults != null) ? (opts.maxResults | 0) : 32;
+      if (opts.roi) {
+        const r = opts.roi;
+        return host.findColors(range.rMin | 0, range.rMax | 0, range.gMin | 0, range.gMax | 0,
+                               range.bMin | 0, range.bMax | 0,
+                               true, r.x | 0, r.y | 0, r.w | 0, r.h | 0,
+                               minArea, maxResults);
+      }
+      return host.findColors(range.rMin | 0, range.rMax | 0, range.gMin | 0, range.gMax | 0,
+                             range.bMin | 0, range.bMax | 0,
+                             false, 0, 0, 0, 0, minArea, maxResults);
     },
 
     /** Sample BGR color at window-relative (x, y). */
     colorAt(x, y) { return host.colorAt(x | 0, y | 0); },
+
+    /**
+     * HP / MP / cooldown bar fill ratio. Returns 0..1.
+     * @param {{x,y,w,h}} roi
+     * @param {{r,g,b}} color  Target fill color (BGR or RGB; matched per channel).
+     * @param {{ tolerance?: number }=} opts  Per-channel ±tolerance, default 25.
+     */
+    percentBar(roi, color, opts) {
+      opts = opts || {};
+      const tol = (opts.tolerance != null) ? (opts.tolerance | 0) : 25;
+      return host.percentBar(roi.x | 0, roi.y | 0, roi.w | 0, roi.h | 0,
+                             color.r | 0, color.g | 0, color.b | 0, tol);
+    },
+
+    /**
+     * Snapshot a ROI into a named baseline. Subsequent vision.diff(name, roi) calls
+     * return how much that ROI has changed since the snapshot.
+     */
+    captureBaseline(name, roi) {
+      host.captureBaseline(String(name), roi.x | 0, roi.y | 0, roi.w | 0, roi.h | 0);
+    },
+
+    /**
+     * Mean absolute pixel difference (0..1) between the named baseline and the same
+     * ROI in the current frame. 0 = no change, 1 = totally different. Returns 1.0
+     * when no baseline is registered under that name.
+     */
+    diff(name, roi) {
+      return host.diffBaseline(String(name), roi.x | 0, roi.y | 0, roi.w | 0, roi.h | 0);
+    },
+
+    /** Clear all baselines. */
+    clearBaselines() { host.clearBaselines(); },
   };
 
   globalThis.input = {
@@ -98,6 +179,129 @@ internal static class StdLib
       const next = (typeof cur === 'number' ? cur : 0) + (by == null ? 1 : by);
       this.set(key, next);
       return next;
+    },
+  };
+
+  // ---------------- brickbot — event bus + actions + triggers + tick loop ----------------
+
+  const __handlers = Object.create(null);     // eventName → [fn]
+  const __actions = Object.create(null);      // actionName → fn
+  const __triggers = [];                      // [{ predicate, action, cooldownMs, nextAllowed }]
+
+  function __dispatch(eventName, payload) {
+    const arr = __handlers[eventName];
+    if (!arr) return;
+    // Slice so off() during dispatch doesn't shift the loop.
+    for (const fn of arr.slice()) {
+      try { fn(payload); }
+      catch (e) { host.log('[brickbot.on:' + eventName + '] ' + (e && e.stack || e)); }
+    }
+  }
+
+  function __publishActions() {
+    host.publishActions(Object.keys(__actions));
+  }
+
+  globalThis.brickbot = {
+    /**
+     * Subscribe a handler to a named event.
+     * Built-in events: 'start', 'stop', 'tick', 'frame', 'error'.
+     * Returns an unsubscribe function.
+     */
+    on(eventName, fn) {
+      if (typeof fn !== 'function') throw new Error('brickbot.on: handler must be a function');
+      const arr = __handlers[eventName] || (__handlers[eventName] = []);
+      arr.push(fn);
+      return function () { brickbot.off(eventName, fn); };
+    },
+
+    off(eventName, fn) {
+      const arr = __handlers[eventName];
+      if (!arr) return;
+      const i = arr.indexOf(fn);
+      if (i >= 0) arr.splice(i, 1);
+    },
+
+    emit(eventName, payload) { __dispatch(eventName, payload); },
+
+    /** Register a named action — invokable from UI via the Actions panel or from
+     *  scripts via brickbot.invoke(name). */
+    action(name, fn) {
+      if (typeof fn !== 'function') throw new Error('brickbot.action: handler must be a function');
+      __actions[String(name)] = fn;
+      __publishActions();
+    },
+
+    invoke(name) {
+      const fn = __actions[String(name)];
+      if (typeof fn !== 'function') {
+        log('[brickbot.invoke] unknown action: ' + name);
+        return;
+      }
+      try { fn(); }
+      catch (e) { log('[brickbot.action:' + name + '] ' + (e && e.stack || e)); }
+    },
+
+    listActions() { return Object.keys(__actions); },
+
+    /**
+     * Declarative trigger. Predicate runs every tick; action fires when predicate is truthy.
+     * @param {() => boolean} predicate
+     * @param {() => void} action
+     * @param {{ cooldownMs?: number }=} opts  cooldownMs throttles repeated firings (default 0).
+     */
+    when(predicate, action, opts) {
+      __triggers.push({
+        predicate: predicate,
+        action: action,
+        cooldownMs: (opts && opts.cooldownMs) || 0,
+        nextAllowed: 0,
+      });
+    },
+
+    /**
+     * Main loop. Runs until isCancelled() (Stop pressed).
+     * Each tick: drains queued action invocations, pumps a frame, fires 'frame' event,
+     * runs trigger predicates, fires 'tick' event, sleeps tickMs.
+     * Emits 'start' before the first tick and 'stop' on exit.
+     */
+    runForever(opts) {
+      opts = opts || {};
+      const tickMs = opts.tickMs != null ? opts.tickMs : 16;
+      __dispatch('start', null);
+      try {
+        while (!isCancelled()) {
+          // Pull any action invocations queued from UI / IPC.
+          let pending;
+          while ((pending = host.tryDequeueAction()) != null) {
+            brickbot.invoke(pending);
+          }
+
+          // Pump a fresh frame so vision.* sees a consistent image during this tick.
+          let pumped = null;
+          try { pumped = host.pumpFrame(); }
+          catch (e) { __dispatch('error', { phase: 'pump', message: String(e) }); }
+
+          if (pumped !== null) __dispatch('frame', pumped);
+
+          // Evaluate declarative triggers.
+          const t = now();
+          for (const tr of __triggers) {
+            if (t < tr.nextAllowed) continue;
+            let fired = false;
+            try { fired = !!tr.predicate(); }
+            catch (e) { __dispatch('error', { phase: 'trigger.predicate', message: String(e) }); }
+            if (!fired) continue;
+            try { tr.action(); tr.nextAllowed = t + tr.cooldownMs; }
+            catch (e) { __dispatch('error', { phase: 'trigger.action', message: String(e) }); }
+          }
+
+          __dispatch('tick', null);
+          wait(tickMs);
+        }
+      } finally {
+        __dispatch('stop', null);
+      }
     },
   };
 })();

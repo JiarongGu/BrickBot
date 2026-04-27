@@ -7,6 +7,14 @@ public interface IRunnerService
     RunnerState State { get; }
     void Start(RunRequest request);
     void Stop();
+
+    /// <summary>Currently registered <c>brickbot.action</c> names for the active run.
+    /// Empty when no run is active.</summary>
+    IReadOnlyList<string> ListActions();
+
+    /// <summary>Schedule a registered action to fire on the next engine tick.
+    /// Throws RUNNER_ACTION_NOT_FOUND if no run is active or the name is unknown.</summary>
+    void InvokeAction(string actionName);
 }
 
 /// <summary>

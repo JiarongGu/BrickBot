@@ -7,6 +7,9 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>false</UseWPF>
+    <!-- WinRtCaptureService uses unsafe COM vtable interop to call ID3D11Device methods
+         without pulling in SharpDX/Vortice. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Disable CET (Hardware-enforced Stack Protection) to prevent
          STATUS_STACK_BUFFER_OVERRUN crash when shell extensions (image
          thumbnail providers) load in file dialogs. These older DLLs
@@ -61,6 +64,10 @@
     <!-- Embed application icon (only if file exists) -->
     <EmbeddedResource Include="favicon.ico" Condition="Exists('favicon.ico')">
       <LogicalName>BrickBot.favicon.ico</LogicalName>
+    </EmbeddedResource>
+    <!-- Script host typings served to Monaco via SCRIPT.GET_TYPES -->
+    <EmbeddedResource Include="Modules\Script\Resources\brickbot.d.ts">
+      <LogicalName>BrickBot.Modules.Script.Resources.brickbot.d.ts</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
   <!-- Language files (separate files next to exe) -->

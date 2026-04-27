@@ -3,14 +3,17 @@ import { Card, type CardProps } from 'antd';
 
 /**
  * CompactCard — AntD Card with reduced default margins/padding for tighter layouts.
- *, but lighter: default body padding is 12 (was 16)
- * to give breathing room without over-padding tightly-packed dashboards.
  *
- * Three ways to control padding (precedence: bodyStyle wins over padding wins over defaults):
+ * Body padding (precedence: bodyStyle wins over padding wins over defaults):
  *   <CompactCard>                         → 12px body padding
- *   <CompactCard extraCompact>            → 8px body padding (use in dense toolbars/lists)
+ *   <CompactCard extraCompact>            → 8px body padding (dense toolbars/lists)
  *   <CompactCard padding={4}>             → explicit override
  *   <CompactCard bodyStyle={{ padding: 0 }}> → escape hatch (e.g. embedded Monaco editor)
+ *
+ * Header (title bar) tightening:
+ *   <CompactCard denseHeader>             → 32px min-height, 6/12 padding, 14px title.
+ *                                            Use for sidebar cards where the default
+ *                                            48px AntD title bar wastes vertical space.
  */
 export interface CompactCardProps extends Omit<CardProps, 'style' | 'styles'> {
   style?: React.CSSProperties;
@@ -19,6 +22,8 @@ export interface CompactCardProps extends Omit<CardProps, 'style' | 'styles'> {
   padding?: number | string;
   /** When true, uses 8px body padding + 12px bottom margin. */
   extraCompact?: boolean;
+  /** When true, tighten the title bar to 32px min-height + smaller font + 6/12 padding. */
+  denseHeader?: boolean;
 }
 
 export const CompactCard: React.FC<CompactCardProps> = ({
@@ -27,6 +32,7 @@ export const CompactCard: React.FC<CompactCardProps> = ({
   bodyStyle,
   padding,
   extraCompact = false,
+  denseHeader = false,
   ...rest
 }) => {
   const defaultStyle: React.CSSProperties = {
@@ -42,8 +48,17 @@ export const CompactCard: React.FC<CompactCardProps> = ({
     ...bodyStyle,
   };
 
+  const headerStyle: React.CSSProperties | undefined = denseHeader
+    ? {
+        minHeight: 32,
+        padding: '6px 12px',
+        fontSize: 14,
+        fontWeight: 600,
+      }
+    : undefined;
+
   return (
-    <Card style={defaultStyle} styles={{ body: defaultBodyStyle }} {...rest}>
+    <Card style={defaultStyle} styles={{ body: defaultBodyStyle, header: headerStyle }} {...rest}>
       {children}
     </Card>
   );

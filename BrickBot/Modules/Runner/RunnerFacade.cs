@@ -23,8 +23,17 @@ public sealed class RunnerFacade : BaseFacade
             "GET_STATE" => Task.FromResult<object?>(_service.State),
             "START" => Task.FromResult<object?>(Start(request)),
             "STOP" => Task.FromResult<object?>(Stop()),
+            "LIST_ACTIONS" => Task.FromResult<object?>(new { actions = _service.ListActions() }),
+            "INVOKE_ACTION" => Task.FromResult<object?>(InvokeAction(request)),
             _ => throw new InvalidOperationException($"Unknown RUNNER request type: {request.Type}"),
         };
+    }
+
+    private object InvokeAction(IpcRequest request)
+    {
+        var name = _payload.GetRequiredValue<string>(request.Payload, "name");
+        _service.InvokeAction(name);
+        return new { success = true };
     }
 
     private RunnerState Start(IpcRequest request)

@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { Col, Row } from 'antd';
-import { CameraOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons';
+import { CameraOutlined, ThunderboltOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { CompactCard, CompactSpace } from '@/shared/components/compact';
 import { SlideInScreen } from '@/shared/components/common';
 import { ProfilePanel } from '@/modules/profile';
+import { ActionsPanel } from '@/modules/runner/components/ActionsPanel';
 import { CapturePanel } from '@/modules/template';
 import './ToolsView.css';
 
@@ -45,6 +46,13 @@ export const ToolsView: React.FC = () => {
       icon: <CameraOutlined />,
       render: () => <CapturePanel />,
       bodyClassName: 'tools-view-tool-body',
+    },
+    {
+      key: 'actions',
+      title: t('tools.actions.title', 'Actions'),
+      description: t('tools.actions.description', 'Fire any brickbot.action(...) registered by the running script.'),
+      icon: <ThunderboltOutlined />,
+      render: () => <ActionsPanel />,
     },
   ];
 

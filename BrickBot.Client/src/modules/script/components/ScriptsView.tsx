@@ -34,6 +34,7 @@ import { FormDialog } from '@/shared/components/dialogs';
 import { useProfileStore } from '@/modules/profile';
 import { CapturePanel } from '@/modules/template';
 import { useScriptStore } from '../store/scriptStore';
+import { useEditorBridgeStore } from '../store/editorBridgeStore';
 import {
   STARTER_TEMPLATES,
   createScript,
@@ -63,6 +64,12 @@ export const ScriptsView: React.FC = () => {
   useEffect(() => {
     if (activeProfileId) void loadScripts(activeProfileId);
   }, [activeProfileId]);
+
+  useEffect(() => {
+    // Drop the editor reference on unmount so the bridge doesn't dispatch into a
+    // disposed Monaco instance (e.g. when the user navigates to a different tab).
+    return () => useEditorBridgeStore.getState().setEditor(undefined);
+  }, []);
 
   const grouped = useMemo(() => {
     const main = files.filter((f) => f.kind === 'main');
@@ -118,8 +125,13 @@ export const ScriptsView: React.FC = () => {
             selected ? (
               <CompactSpace>
                 <Tag color={selected.kind === 'main' ? 'gold' : 'blue'}>{selected.kind}</Tag>
-                <span>{selected.name}.js</span>
+                <span>{selected.name}.ts</span>
                 {selected.dirty && <Tag color="orange">{t('script.unsaved', 'Unsaved')}</Tag>}
+                {selected.diagnostics.some((d) => d.severity === 'error') && (
+                  <Tag color="red">
+                    {t('script.errors', '{{count}} error', { count: selected.diagnostics.filter((d) => d.severity === 'error').length })}
+                  </Tag>
+                )}
               </CompactSpace>
             ) : (
               t('script.editor.empty', 'Select a script')
@@ -158,11 +170,16 @@ export const ScriptsView: React.FC = () => {
           {selected ? (
             <Editor
               height="100%"
-              defaultLanguage="javascript"
-              path={`${selected.kind}/${selected.name}.js`}
+              defaultLanguage="typescript"
+              path={`file:///scripts/${selected.kind}/${selected.name}.ts`}
               value={selected.source}
               onChange={(v) => useScriptStore.getState().setSource(v ?? '')}
-              options={{ minimap: { enabled: false }, fontSize: 13, automaticLayout: true }}
+              onMount={(editor) => {
+                // Register with the bridge so CapturePanel + future tools can paste
+                // brickbot snippets at the cursor without depending on Monaco APIs.
+                useEditorBridgeStore.getState().setEditor(editor);
+              }}
+              options={{ minimap: { enabled: false }, fontSize: 14, automaticLayout: true }}
             />
           ) : (
             <Empty
@@ -244,7 +261,7 @@ const ScriptSection: React.FC<{
                   </Popconfirm>,
                 ]}
               >
-                <span className="scripts-view-item__name">{file.name}.js</span>
+                <span className="scripts-view-item__name">{file.name}.ts</span>
               </List.Item>
             );
           }}
@@ -295,7 +312,7 @@ const CreateScriptDialog: React.FC<{
             { pattern: /^[A-Za-z0-9_\-]+$/, message: t('script.create.nameInvalid', 'Letters, numbers, _, - only') },
           ]}
         >
-          <CompactInput placeholder="combat-loop" addonAfter=".js" />
+          <CompactInput placeholder="combat-loop" addonAfter=".ts" />
         </Form.Item>
       </Form>
     </FormDialog>
