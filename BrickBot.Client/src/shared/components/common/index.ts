@@ -9,3 +9,6 @@ export type { CloseButtonProps } from './CloseButton';
 
 export { SlideInScreen } from './SlideInScreen';
 export type { SlideInScreenProps } from './SlideInScreen';
+
+export { WindowSelector } from './WindowSelector';
+export type { WindowSelectorProps } from './WindowSelector';

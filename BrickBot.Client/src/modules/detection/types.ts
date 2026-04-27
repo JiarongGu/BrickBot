@@ -46,7 +46,10 @@ export interface RgbColor {
 }
 
 export interface TemplateOptions {
+  /** Legacy: id of a Templates-table row. Trainer-built definitions populate `embeddedPng`. */
   templateName: string;
+  /** Base64 PNG embedded directly in the detection — the trainer writes this. */
+  embeddedPng?: string;
   minConfidence: number;
   scale: number;
   grayscale: boolean;
@@ -58,6 +61,7 @@ export interface TemplateOptions {
 export interface ProgressBarOptions {
   /** Optional — leave blank to source the bar bbox from the ROI directly (anchor / fromDetection). */
   templateName: string;
+  embeddedPng?: string;
   minConfidence: number;
   templateEdge: boolean;
   scale: number;
@@ -85,12 +89,16 @@ export interface ColorPresenceOptions {
 export interface EffectOptions {
   threshold: number;
   autoBaseline: boolean;
+  /** Trainer-pinned baseline image (base64 PNG). When set, runtime uses this instead of
+   *  capturing the first runtime frame as baseline. */
+  embeddedBaselinePng?: string;
   /** Edge-diff vs baseline. Catches shape changes; ignores lighting / color shifts. */
   edge: boolean;
 }
 
 export interface FeatureMatchOptions {
   templateName: string;
+  embeddedPng?: string;
   minConfidence: number;
   scaleMin: number;
   scaleMax: number;
@@ -109,11 +117,24 @@ export interface DetectionOverlay {
   label?: string;
 }
 
+/** Output value shape — drives `result.typedValue` so scripts read a consistent shape regardless of kind. */
+export type DetectionOutputType = 'boolean' | 'number' | 'text' | 'bbox' | 'bboxes' | 'point';
+
+export interface DetectionStability {
+  /** Value must hold steady for this many ms before being surfaced. 0 = no debounce. */
+  minDurationMs: number;
+  /** Numeric jitter tolerance for "same value" comparison (0 = exact equality). */
+  tolerance: number;
+}
+
 export interface DetectionOutput {
   ctxKey?: string;
   event?: string;
   eventOnChangeOnly: boolean;
   overlay?: DetectionOverlay;
+  /** Primary value shape exposed via `r.typedValue` to scripts. */
+  type?: DetectionOutputType;
+  stability?: DetectionStability;
 }
 
 export interface DetectionDefinition {
@@ -153,6 +174,8 @@ export interface DetectionResult {
   strip?: ResultBox;
   blobs?: ResultBox[];
   confidence?: number;
+  /** Output-shape-aware value driven by `output.type`. Set by the JS detect.run wrapper. */
+  typedValue?: unknown;
 }
 
 /** One labeled image for training. The label's interpretation depends on `kind`:

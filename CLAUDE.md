@@ -117,26 +117,57 @@ Save workflow feedback, conventions, and corrections to `.claude/rules/`, NOT gl
 
 ## 6. Scripting
 
-User scripts use **JavaScript via Jint** (pure-C#, no native deps). See D-007 in `docs/core/DESIGN_DECISIONS.md`.
+User scripts use **JavaScript via Jint** (pure-C#, no native deps). See D-007 + D-008 in `docs/core/DESIGN_DECISIONS.md`.
 
-**Two script kinds per profile**, picked up from `data/profiles/{id}/scripts/`:
+### The 4-step automation workflow
+
+Every BrickBot automation follows this layer cake — keep features on the right layer:
+
+1. **Detection objects** (`Detections` tab) — typed, named vision rules. Authored via the
+   training wizard (capture samples → label → train → save). No code; results expose as
+   `detect.run('name')` returning `{ value, found, match, triggered, blobs, … }`.
+2. **Library scripts** (`library/*.js`) — perception + state. Read detections, write to `ctx`,
+   `brickbot.emit()` events, register `brickbot.action()`s. Each loaded lazily via `require()`
+   from the main script.
+3. **Main script** (`main/<name>.js`) — orchestrator. Reads `ctx`, listens via `brickbot.on()`,
+   declares `brickbot.when()` triggers, runs `brickbot.runForever({ tickMs, autoDetect })`.
+   The Runner executes ONE main per Run.
+4. **Runner** (Runner tab) — picks window + main, starts the run with optional
+   **stop conditions**: `{ timeoutMs, onEvent, ctxKey + ctxOp + ctxValue }`. Manual Stop
+   always works. Scripts can request shutdown via `brickbot.stop('reason')`.
+
+### Script kinds (filename-based)
+
+Two script kinds per profile, picked up from `data/profiles/{id}/scripts/`:
 - `main/*.js` — top-level orchestrators. The Runner picks ONE main script and executes it.
-- `library/*.js` — helpers, monitors, skill defs. **All** library files load into the engine BEFORE main runs (alphabetical order).
+- `library/*.js` — helpers, monitors, skill defs. Loaded **lazily** via `require()`; the
+  legacy alphabetical pre-load is gone. Use `require('./hp-monitor')` from main or another lib.
 
-**Run order** (single Jint engine, single thread): `init.js` → `combat.js` (BT primitives) → every `library/*.js` (alphabetical) → selected `main/<name>.js`.
+**Run order** (single Jint engine, single thread): `init.js` → `combat.js` (BT primitives) →
+selected `main/<name>.js` → libraries pulled lazily via `require()`.
 
-**Shared context (`ctx`)** — per-Run JSON-backed key/value store, exposed as JS global. Library "monitor" functions write (`ctx.set('hp', 70)`), main reads (`ctx.get('hp')`). Methods: `set / get / has / delete / keys / snapshot / inc`. Cleared each Run.
+**Shared context (`ctx`)** — per-Run JSON-backed key/value store, exposed as JS global.
+Library "monitor" functions write (`ctx.set('hp', 70)`), main reads (`ctx.get('hp')`).
+Methods: `set / get / has / delete / keys / snapshot / inc`. Cleared each Run.
 
-**Files**: `Modules/Script/Services/{StdLib.cs, HostApi.cs, ScriptContext.cs, ScriptFileService.cs}`. New host primitive → method on `HostApi.cs` + wrapper in `StdLib.InitScript`. Never expose `__host` directly to user scripts.
+**Stop API** — `brickbot.stop(reason?)` from any script triggers graceful shutdown; the
+runner surfaces the reason in `RunnerState.stoppedReason`. Runner-side timeout watchdog
+trips even when the script blocks on a long vision call.
+
+**Files**: `Modules/Script/Services/{StdLib.cs, HostApi.cs, ScriptContext.cs, ScriptFileService.cs}`.
+New host primitive → method on `HostApi.cs` + wrapper in `StdLib.InitScript` + typing in
+`Modules/Script/Resources/brickbot.d.ts`. Never expose `__host` directly to user scripts.
 
 ---
 
 ## 7. UI Tabs
 
 Top-level navigation (`App.tsx`):
-- **Runner** — pick window + main script, start/stop, log. No code editor here.
+- **Runner** — pick window + main script, configure stop conditions, start/stop, log.
 - **Scripts** — Main/Library file browser + Monaco editor. Toolbar **Capture** button opens the Capture panel as a slide-in for mid-edit template authoring.
-- **Tools** — grid of utility cards, each opens in a `<SlideInScreen>`. Today: Profiles, Captures. Future: ROI picker, color sampler.
+- **Detections** — list / filter / edit / re-train detections; "Train new" launches the 5-step wizard. Detections are self-contained — embed their own template bytes; no reliance on the Templates table.
+- **Recordings** — record gameplay once, reuse the frames across many detection trainings. Each recording = named multi-frame capture with metadata; training wizard's Samples step has a "From recording" mode that pulls frames into the labels list.
+- **Tools** — grid of utility cards, each opens in a `<SlideInScreen>`. Today: Profiles, Captures, Actions.
 - **Settings** — theme / language / log-level / window-state-reset (global).
 
 Active profile dropdown lives in the header. Its "Manage profiles" link routes to the Tools tab.

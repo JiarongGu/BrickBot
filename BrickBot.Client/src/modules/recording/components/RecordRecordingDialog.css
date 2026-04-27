@@ -1,0 +1,287 @@
+/* SlideInScreen body — let the wizard own the layout. */
+.record-dialog__body {
+  padding: 0 !important;
+  height: 100%;
+}
+
+.record-dialog__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.record-dialog {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-bg-base);
+}
+
+/* ---- Stepper (mirrors TrainingPanel pill design) ---- */
+.record-dialog__stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border-secondary);
+  background: var(--color-card-header-bg);
+  flex-shrink: 0;
+}
+
+.record-dialog__step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--border-radius-base);
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.record-dialog__step:hover {
+  color: var(--color-text-base);
+}
+
+.record-dialog__step--active {
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
+}
+
+.record-dialog__step--active:hover {
+  color: var(--color-text-inverse);
+}
+
+.record-dialog__step--done {
+  color: var(--color-success);
+}
+
+.record-dialog__step--disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.record-dialog__step-arrow {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+/* ---- Content ---- */
+.record-dialog__content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 24px;
+  display: flex;
+}
+
+.record-dialog__step-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.record-dialog__hint {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+/* Two-column layout: form on left, preview on right. Used in Configure step. */
+.record-dialog__split {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) 1fr;
+  gap: 16px;
+  min-height: 0;
+}
+
+.record-dialog__split-left {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.record-dialog__split-right {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.record-dialog__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.record-dialog__field-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.record-dialog__field-optional {
+  color: var(--color-text-tertiary);
+  font-weight: normal;
+}
+
+.record-dialog__field-readout {
+  font-size: 14px;
+  color: var(--color-text-base);
+  font-family: source-code-pro, Menlo, Monaco, Consolas, monospace;
+  padding: 4px 8px;
+  background: var(--color-bg-base);
+  border-radius: var(--border-radius-sm);
+  border: 1px solid var(--color-border-secondary);
+}
+
+.record-dialog__settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+}
+
+/* ---- Record step ---- */
+.record-dialog__record-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.record-dialog__record-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.record-dialog__frame-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.record-dialog__live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-error);
+  font-weight: 500;
+}
+
+.record-dialog__live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-error);
+  animation: record-dialog-blink 1s infinite;
+}
+
+@keyframes record-dialog-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.record-dialog__progress {
+  height: 6px;
+  background: var(--color-bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-secondary);
+  flex-shrink: 0;
+}
+
+.record-dialog__progress-fill {
+  height: 100%;
+  transition: width 0.1s linear;
+}
+
+/* ---- Review step ---- */
+.record-dialog__review-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-base);
+  flex-shrink: 0;
+}
+
+.record-dialog__frame-info {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  min-width: 110px;
+  font-family: source-code-pro, Menlo, Monaco, Consolas, monospace;
+  text-align: right;
+}
+
+/* ---- Large preview (record + review) ---- */
+.record-dialog__preview-large {
+  flex: 1;
+  min-height: 280px;
+  background: #0a0a0a;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.record-dialog__preview-large img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.record-dialog__preview-empty {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  padding: 32px;
+  max-width: 480px;
+  line-height: 1.5;
+}
+
+/* ---- Save step ---- */
+.record-dialog__summary {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  padding: 10px 12px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-base);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.record-dialog__summary strong {
+  color: var(--color-text-base);
+  font-size: 14px;
+}
+
+.record-dialog__summary-meta {
+  color: var(--color-text-tertiary);
+}
+
+/* ---- Footer ---- */
+.record-dialog__footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  border-top: 1px solid var(--color-border-secondary);
+  background: var(--color-card-header-bg);
+  flex-shrink: 0;
+}

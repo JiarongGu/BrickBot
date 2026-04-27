@@ -162,6 +162,53 @@ Embedded scripting language is **JavaScript**, evaluated by [Jint](https://githu
 
 ---
 
+## D-008: Detection-first authoring + stop conditions
+
+**Date:** 2026-04-28
+**Status:** Accepted
+
+Locked-in **4-layer automation workflow**. Features go on the right layer; do not collapse them.
+
+1. **Detection objects** — typed, named vision rules. Authored by the training wizard
+   (`DetectionsView` → `TrainingPanel`) and persisted in the per-profile SQLite (the `Detections`
+   table). Five kinds: `template`, `progressBar`, `colorPresence`, `effect`, `featureMatch`,
+   `region`. Scripts read by name: `detect.run('hp-bar').value`.
+2. **Library scripts** — perception + state. Run detections, write to `ctx`, emit `brickbot`
+   events, register named `brickbot.action()`s. Loaded **lazily** via `require()` (the legacy
+   alphabetical pre-load is gone). Each library file is a CommonJS module emit.
+3. **Main script** — orchestrator. Reads `ctx`, listens via `brickbot.on()`, declares
+   `brickbot.when()` triggers, runs `brickbot.runForever({ tickMs, autoDetect })`. The Runner
+   executes ONE main per Run.
+4. **Runner** — picks window + main, optionally configures stop conditions, drives the engine
+   thread with cancellation.
+
+**Stop conditions** (`RunRequest.StopWhen`):
+- `TimeoutMs` — C# `Task.Delay` watchdog so even blocking scripts (long vision call) trip out.
+- `OnEvent` — JS-side `brickbot.on()` subscription requesting stop on any matching `emit()`.
+- `CtxKey + CtxOp + CtxValue` — JS-side per-tick predicate check inside `runForever`.
+
+All conditions OR-combined; manual Stop wins over everything. The first stop trigger wins so
+"user clicked Stop" never gets overwritten by a stale timeout completing right after.
+
+`RunnerState.StoppedReason` (`user / timeout / event / context / script / completed / faulted`)
+is surfaced in the UI so users know **why** a run ended. Scripts request shutdown with
+`brickbot.stop('reason')` (becomes `Script` reason) — useful for goal-driven flows.
+
+**Why:** Without explicit stop conditions, the only way to end a run was to babysit it. Long
+training runs and goal-driven automations (e.g. "fish until you have 100 items") need the
+runner to self-terminate. The split between C# (timeout watchdog) and JS (event/ctx checks)
+keeps each kind on the layer that owns the data — JS owns the event bus and ctx, C# owns
+the cancellation token.
+
+**How to apply:** New stop conditions → add a field to `StopWhenOptions`, plumb through
+`RunnerFacade.Start`, then either:
+  - Implement in C# if it can be checked off the engine thread (timer, file-watch, etc.).
+  - Implement in JS-side `runForever` if it depends on engine-thread state (ctx, events).
+Always set `host.RequestStop(reason, detail)` rather than calling `cts.Cancel()` directly so
+the surfaced reason matches the trigger.
+
+---
+
 ## D-005: Folder name vs. project name
 
 **Date:** 2026-04-27

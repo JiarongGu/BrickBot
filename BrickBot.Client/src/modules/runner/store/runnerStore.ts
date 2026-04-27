@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { LogEntry, RunnerState, WindowInfo } from '../types';
+import type { LogEntry, RunnerState, StopWhenOptions, WindowInfo } from '../types';
 
 interface RunnerStoreState {
   windows: WindowInfo[];
@@ -10,6 +10,8 @@ interface RunnerStoreState {
   /** Names (no extension) of every main/*.js in the active profile. Refreshed on profile load. */
   availableMains: string[];
   templateRoot: string;
+  /** Optional auto-stop conditions applied to the next run. Cleared when fields are blank. */
+  stopWhen: StopWhenOptions;
   state: RunnerState;
   log: LogEntry[];
 }
@@ -20,6 +22,7 @@ interface RunnerStoreActions {
   setAvailableMains: (mains: string[]) => void;
   setSelectedMain: (name: string | undefined) => void;
   setTemplateRoot: (path: string) => void;
+  setStopWhen: (patch: Partial<StopWhenOptions>) => void;
   setState: (state: RunnerState) => void;
   appendLog: (entry: LogEntry) => void;
   clearLog: () => void;
@@ -32,7 +35,8 @@ export const useRunnerStore = create<RunnerStoreState & RunnerStoreActions>()(
     selectedMain: undefined,
     availableMains: [],
     templateRoot: '',
-    state: { status: 'idle' },
+    stopWhen: {},
+    state: { status: 'idle', stoppedReason: 'none' },
     log: [],
 
     setWindows: (windows) => set((s) => { s.windows = windows; }),
@@ -45,6 +49,14 @@ export const useRunnerStore = create<RunnerStoreState & RunnerStoreActions>()(
     }),
     setSelectedMain: (name) => set((s) => { s.selectedMain = name; }),
     setTemplateRoot: (path) => set((s) => { s.templateRoot = path; }),
+    setStopWhen: (patch) => set((s) => {
+      // Empty strings collapse to undefined so we don't ship blank conditions to the backend.
+      s.stopWhen = { ...s.stopWhen, ...patch };
+      for (const k of Object.keys(s.stopWhen) as (keyof StopWhenOptions)[]) {
+        const v = s.stopWhen[k];
+        if (v === '' || v === null) delete (s.stopWhen as Partial<StopWhenOptions>)[k];
+      }
+    }),
     setState: (state) => set((s) => { s.state = state; }),
     appendLog: (entry) => set((s) => {
       s.log.push(entry);

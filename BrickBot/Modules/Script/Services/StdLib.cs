@@ -217,19 +217,81 @@ internal static class StdLib
     return result.found;
   }
 
+  /** Output-shape-aware value driven by def.output.type. Falls back to legacy primary value
+   *  when no type set. Scripts read result.typedValue for a consistent shape across kinds. */
+  function __typedValue(def, result) {
+    const t = def.output && def.output.type;
+    if (!t) return __resultValue(result);
+    switch (t) {
+      case 'boolean': return !!result.found;
+      case 'number':
+        if (result.value != null) return result.value;
+        if (result.confidence != null) return result.confidence;
+        return result.found ? 1 : 0;
+      case 'text':   return result.text != null ? result.text : '';
+      case 'bbox':   return result.match || null;
+      case 'bboxes': return result.blobs || (result.match ? [result.match] : []);
+      case 'point':  return result.match ? { x: result.match.cx, y: result.match.cy } : null;
+      default:       return __resultValue(result);
+    }
+  }
+
+  /** Per-detection stability cache: { value, since, lastEmitted }. The wrapper only emits a
+   *  new value when it has been observed unchanged for at least def.output.stability.minDurationMs.
+   *  Filters single-frame flicker without losing real transitions. */
+  const __stabilityState = Object.create(null);
+
+  function __valueEqual(a, b, tol) {
+    if (a === b) return true;
+    if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) <= (tol || 0);
+    try { return JSON.stringify(a) === JSON.stringify(b); } catch (_) { return false; }
+  }
+
+  /** Decides whether the freshly-computed value is "stable enough" to surface. Mutates the
+   *  stability cache. Returns the value to expose to scripts (may be the previously-stable
+   *  value if the new one is still settling). */
+  function __applyStability(def, value) {
+    const stab = def.output && def.output.stability;
+    if (!stab || !stab.minDurationMs) return value;
+    const tol = stab.tolerance || 0;
+    const nowMs = now();
+    const st = __stabilityState[def.id];
+    if (!st) {
+      __stabilityState[def.id] = { value: value, since: nowMs, lastEmitted: undefined };
+      return undefined;  // first observation — not stable yet
+    }
+    if (!__valueEqual(st.value, value, tol)) {
+      st.value = value;
+      st.since = nowMs;
+    }
+    if (nowMs - st.since >= stab.minDurationMs) {
+      st.lastEmitted = st.value;
+      return st.value;
+    }
+    return st.lastEmitted;  // still settling — keep last stable (or undefined)
+  }
+
   function __applyOutput(def, result) {
     const out = def.output;
+    // Compute typed value + apply stability filter regardless of bindings — populates
+    // result.typedValue so direct r.typedValue reads work too.
+    const rawTyped = __typedValue(def, result);
+    const stableTyped = __applyStability(def, rawTyped);
+    try { result.typedValue = stableTyped !== undefined ? stableTyped : rawTyped; } catch (_) { /* readonly */ }
     if (!out) return;
-    const value = __resultValue(result);
-    if (out.ctxKey) ctx.set(out.ctxKey, value);
+    // For ctx / event, prefer the stable value. If stability hasn't settled yet (undefined),
+    // skip writes — better than emitting flicker.
+    const valueToEmit = stableTyped;
+    if (valueToEmit === undefined) return;
+    if (out.ctxKey) ctx.set(out.ctxKey, valueToEmit);
     if (out.event) {
       const prev = __detectionLast[def.id];
-      const changed = prev === undefined || prev !== value;
+      const changed = prev === undefined || !__valueEqual(prev, valueToEmit, (out.stability && out.stability.tolerance) || 0);
       if (!out.eventOnChangeOnly || changed) {
-        brickbot.emit(out.event, { id: def.id, name: def.name, value: value, result: result });
+        brickbot.emit(out.event, { id: def.id, name: def.name, value: valueToEmit, result: result });
       }
+      __detectionLast[def.id] = valueToEmit;
     }
-    __detectionLast[def.id] = value;
   }
 
   globalThis.detect = {
@@ -357,6 +419,16 @@ internal static class StdLib
     listActions() { return Object.keys(__actions); },
 
     /**
+     * Request graceful shutdown of the run. The reason surfaces in the runner's
+     * stoppedReason state so the UI can show why a run ended (e.g. "stop: doneCondition").
+     * @param {string=} reason  Free-form reason; defaults to 'script'. Caller can pass an
+     *   identifier like 'goalReached' or 'errorBudgetExceeded'.
+     */
+    stop(reason) {
+      host.requestStop('script', reason ? String(reason) : null);
+    },
+
+    /**
      * Declarative trigger. Predicate runs every tick; action fires when predicate is truthy.
      * @param {() => boolean} predicate
      * @param {() => void} action
@@ -381,6 +453,40 @@ internal static class StdLib
       opts = opts || {};
       const tickMs = opts.tickMs != null ? opts.tickMs : 16;
       const autoDetect = !!opts.autoDetect;
+
+      // Wire stop conditions configured on the run. Timeout is owned by the C# watchdog
+      // (so blocking calls still trip it); event + ctx-predicate live here because they
+      // need the JS event bus / ctx state.
+      const __stopWhen = host.stopWhen();
+      let __stopEventOff = null;
+      if (__stopWhen && __stopWhen.onEvent) {
+        __stopEventOff = brickbot.on(__stopWhen.onEvent, function () {
+          host.requestStop('event', __stopWhen.onEvent);
+        });
+      }
+
+      function __ctxStopMatches() {
+        if (!__stopWhen || !__stopWhen.ctxKey) return false;
+        const cur = ctx.get(__stopWhen.ctxKey);
+        const lhs = (typeof cur === 'number') ? cur : parseFloat(cur);
+        const rhs = parseFloat(__stopWhen.ctxValue);
+        const op = __stopWhen.ctxOp || 'eq';
+        if (!isNaN(lhs) && !isNaN(rhs)) {
+          switch (op) {
+            case 'eq':  return lhs === rhs;
+            case 'neq': return lhs !== rhs;
+            case 'gt':  return lhs > rhs;
+            case 'gte': return lhs >= rhs;
+            case 'lt':  return lhs < rhs;
+            case 'lte': return lhs <= rhs;
+          }
+        }
+        // Fall back to string comparison for non-numeric values.
+        const lhsStr = String(cur != null ? cur : '');
+        const rhsStr = String(__stopWhen.ctxValue != null ? __stopWhen.ctxValue : '');
+        return op === 'neq' ? lhsStr !== rhsStr : lhsStr === rhsStr;
+      }
+
       __dispatch('start', null);
       try {
         while (!isCancelled()) {
@@ -416,10 +522,18 @@ internal static class StdLib
             catch (e) { __dispatch('error', { phase: 'trigger.action', message: String(e) }); }
           }
 
+          // ctx-based stop: evaluated on every tick after triggers had a chance to update ctx.
+          if (__stopWhen && __stopWhen.ctxKey && __ctxStopMatches()) {
+            host.requestStop('context',
+              __stopWhen.ctxKey + ' ' + (__stopWhen.ctxOp || 'eq') + ' ' + __stopWhen.ctxValue);
+            break;
+          }
+
           __dispatch('tick', null);
           wait(tickMs);
         }
       } finally {
+        if (__stopEventOff) { try { __stopEventOff(); } catch (_) {} }
         __dispatch('stop', null);
       }
     },

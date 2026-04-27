@@ -119,13 +119,14 @@ export const DetectionEditor: React.FC<Props> = ({ draft, siblingDetections, tem
       {/* Kind */}
       <div className="detection-section">
         <div className="detection-section__title">{t('detection.section.kind', 'Kind')}</div>
-        <CompactSegmented
+        <CompactSelect
           value={draft.kind}
           onChange={(v) => setKind(v as DetectionKind)}
           options={(Object.keys(DETECTION_KIND_LABEL) as DetectionKind[]).map((k) => ({
             value: k,
             label: t(`detection.kind.${k}`, DETECTION_KIND_LABEL[k]),
           }))}
+          style={{ width: '100%' }}
         />
       </div>
 
@@ -152,9 +153,87 @@ export const DetectionEditor: React.FC<Props> = ({ draft, siblingDetections, tem
         <RegionForm opt={draft.region} onChange={(opt) => onChange({ ...draft, region: opt })} />
       )}
 
-      {/* Output */}
       <OutputSection draft={draft} onChange={onChange} />
+
+      {/* Script-usage hint */}
+      <div className="detection-section">
+        <div className="detection-section__title">{t('detection.section.usage', 'Use in scripts')}</div>
+        <div className="detection-section__hint">
+          {t('detection.usage.hint', 'Scripts read this detection by name. Wire ctx / events yourself in your script:')}
+        </div>
+        <pre className="detection-script-hint">{`const r = detect.run('${draft.name || 'detection-name'}');\n// r.typedValue is shaped per output.type (boolean/number/text/bbox/bboxes/point)\n// r.found, r.match, r.value still available for raw access\nctx.set('${draft.name || 'value'}', r.typedValue);`}</pre>
+      </div>
     </>
+  );
+};
+
+// ============= Output: type + stability =============
+
+/** Output configuration: what shape `r.typedValue` takes + optional debounce. Replaces the
+ *  old ctx/event/overlay UI (scripts handle those themselves now). */
+const OutputSection: React.FC<{ draft: DetectionDefinition; onChange: (d: DetectionDefinition) => void }> = ({ draft, onChange }) => {
+  const { t } = useTranslation();
+  const out = draft.output ?? { eventOnChangeOnly: true };
+  const setOutput = (patch: Partial<typeof out>) => onChange({ ...draft, output: { ...out, ...patch } });
+
+  // Default per-kind output type when user hasn't picked one.
+  const defaultType: Record<DetectionKind, 'boolean' | 'number' | 'bbox' | 'bboxes'> = {
+    template: 'bbox',
+    progressBar: 'number',
+    colorPresence: 'bboxes',
+    effect: 'boolean',
+    featureMatch: 'bbox',
+    region: 'bbox',
+  };
+  const currentType = out.type ?? defaultType[draft.kind];
+  const stab = out.stability ?? { minDurationMs: 0, tolerance: 0 };
+
+  return (
+    <div className="detection-section">
+      <div className="detection-section__title">{t('detection.section.output', 'Output')}</div>
+      <div className="detection-section__hint">
+        {t('detection.output.typeHint', 'Picks the shape returned by detect.run(name).typedValue.')}
+      </div>
+      <div className="detection-field">
+        <span className="detection-field__label">{t('detection.output.typeLabel', 'Output type')}</span>
+        <CompactSelect
+          value={currentType}
+          onChange={(v) => setOutput({ type: v as 'boolean' | 'number' | 'text' | 'bbox' | 'bboxes' | 'point' })}
+          options={[
+            { value: 'boolean', label: t('detection.output.type.boolean', 'Boolean (found / not-found)') },
+            { value: 'number',  label: t('detection.output.type.number', 'Number (fill / count / confidence)') },
+            { value: 'text',    label: t('detection.output.type.text', 'Text (OCR / label)') },
+            { value: 'bbox',    label: t('detection.output.type.bbox', 'Bounding box (single)') },
+            { value: 'bboxes',  label: t('detection.output.type.bboxes', 'Bounding boxes (list)') },
+            { value: 'point',   label: t('detection.output.type.point', 'Point (cx, cy)') },
+          ]}
+          style={{ width: '100%' }}
+        />
+      </div>
+
+      <div className="detection-subtitle">{t('detection.output.stability', 'Stability filter')}</div>
+      <div className="detection-section__hint">
+        {t('detection.output.stabilityHint', 'Only return a value once it has been stable for this many milliseconds — filters single-frame flicker. 0 = disabled.')}
+      </div>
+      <div className="detection-row-2col">
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.output.minDuration', 'Min duration (ms)')}</span>
+          <CompactInput
+            size="small"
+            value={stab.minDurationMs}
+            onChange={(e) => setOutput({ stability: { minDurationMs: Math.max(0, Number(e.target.value) | 0), tolerance: stab.tolerance } })}
+          />
+        </div>
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.output.tolerance', 'Numeric tolerance')}</span>
+          <CompactInput
+            size="small"
+            value={stab.tolerance}
+            onChange={(e) => setOutput({ stability: { minDurationMs: stab.minDurationMs, tolerance: Math.max(0, parseFloat(e.target.value) || 0) } })}
+          />
+        </div>
+      </div>
+    </div>
   );
 };
 
@@ -504,72 +583,9 @@ const RegionForm: React.FC<{ opt: RegionOptions; onChange: (o: RegionOptions) =>
   );
 };
 
-// ============= Output bindings =============
-
-const OutputSection: React.FC<{ draft: DetectionDefinition; onChange: (d: DetectionDefinition) => void }> = ({ draft, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="detection-section">
-      <div className="detection-section__title">{t('detection.section.output', 'Output bindings')}</div>
-      <div className="detection-field">
-        <span className="detection-field__label">{t('detection.output.ctxKey', 'ctx key')}</span>
-        <CompactInput value={draft.output.ctxKey ?? ''} placeholder="hp"
-          onChange={(e) => onChange({ ...draft, output: { ...draft.output, ctxKey: e.target.value || undefined } })} />
-      </div>
-      <div className="detection-field">
-        <span className="detection-field__label">{t('detection.output.event', 'brickbot event')}</span>
-        <CompactInput value={draft.output.event ?? ''} placeholder="hpChanged"
-          onChange={(e) => onChange({ ...draft, output: { ...draft.output, event: e.target.value || undefined } })} />
-      </div>
-      <div className="detection-field">
-        <label className="detection-inline-label">
-          <input type="checkbox" checked={draft.output.eventOnChangeOnly}
-            onChange={(e) => onChange({ ...draft, output: { ...draft.output, eventOnChangeOnly: e.target.checked } })} />
-          {t('detection.output.eventOnChangeOnly', 'Emit event only on value change')}
-        </label>
-      </div>
-      <div className="detection-field">
-        <label className="detection-inline-label">
-          <input type="checkbox" checked={draft.output.overlay?.enabled ?? false}
-            onChange={(e) => onChange({
-              ...draft,
-              output: {
-                ...draft.output,
-                overlay: e.target.checked
-                  ? { enabled: true, color: draft.output.overlay?.color ?? '#52c41a', label: draft.output.overlay?.label }
-                  : draft.output.overlay
-                    ? { ...draft.output.overlay, enabled: false }
-                    : { enabled: false, color: '#52c41a' },
-              },
-            })} />
-          {t('detection.output.overlay', 'Render in game overlay')}
-        </label>
-        {draft.output.overlay?.enabled && (
-          <div className="detection-row-2col" style={{ marginTop: 6 }}>
-            <ColorPicker
-              size="small"
-              value={draft.output.overlay.color}
-              format="hex"
-              onChange={(c: AntColor) => onChange({
-                ...draft,
-                output: { ...draft.output, overlay: { ...draft.output.overlay!, color: c.toHexString() } },
-              })}
-            />
-            <CompactInput
-              size="small"
-              value={draft.output.overlay.label ?? ''}
-              placeholder={t('detection.output.overlayLabel', '{value}') as string}
-              onChange={(e) => onChange({
-                ...draft,
-                output: { ...draft.output, overlay: { ...draft.output.overlay!, label: e.target.value || undefined } },
-              })}
-            />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
+// Output bindings UI removed — scripts call detect.run('name') and decide what to do with
+// the result. Existing detections that have ctx / event / overlay bindings still work at
+// runtime (StdLib detect.run honors def.output) but new detections leave them empty.
 
 // ============= Shared widgets =============
 

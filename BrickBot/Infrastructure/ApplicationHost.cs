@@ -12,6 +12,7 @@ using BrickBot.Modules.Detection;
 using BrickBot.Modules.Input;
 using BrickBot.Modules.Core.Events;
 using BrickBot.Modules.Profile;
+using BrickBot.Modules.Recording;
 using BrickBot.Modules.Runner;
 using BrickBot.Modules.Script;
 using BrickBot.Modules.Setting;
@@ -167,6 +168,7 @@ public sealed class ApplicationHost
             .AddInputServices()
             .AddTemplateServices()
             .AddDetectionServices()
+            .AddRecordingServices()
             .AddScriptServices()
             .AddRunnerServices()
             .AddProfileServices()

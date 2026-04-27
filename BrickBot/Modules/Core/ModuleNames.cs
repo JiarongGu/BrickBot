@@ -7,6 +7,7 @@ public static class ModuleNames
     public const string INPUT = "INPUT";
     public const string TEMPLATE = "TEMPLATE";
     public const string DETECTION = "DETECTION";
+    public const string RECORDING = "RECORDING";
     public const string SCRIPT = "SCRIPT";
     public const string RUNNER = "RUNNER";
     public const string PROFILE = "PROFILE";

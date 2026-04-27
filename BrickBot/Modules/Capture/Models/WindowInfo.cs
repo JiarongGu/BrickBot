@@ -14,4 +14,5 @@ public sealed record WindowInfo(
     int X,
     int Y,
     int Width,
-    int Height);
+    int Height,
+    string? IconBase64 = null);

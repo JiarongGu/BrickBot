@@ -88,9 +88,8 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
     private DetectionResult RunTemplate(string profileId, DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
     {
         var opt = def.Template ?? throw MissingOpts("template");
-        if (string.IsNullOrEmpty(opt.TemplateName)) throw MissingTemplate(def.Id);
 
-        var template = LoadTemplate(profileId, opt.TemplateName);
+        using var template = ResolveTemplateMat(profileId, opt.EmbeddedPng, opt.TemplateName);
         var match = _vision.Find(frame, template, new FindOptions(
             opt.MinConfidence, roi, opt.Scale, opt.Grayscale, opt.Pyramid, opt.Edge));
 
@@ -107,9 +106,8 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
     private DetectionResult RunFeatureMatch(string profileId, DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
     {
         var opt = def.FeatureMatch ?? throw MissingOpts("featureMatch");
-        if (string.IsNullOrEmpty(opt.TemplateName)) throw MissingTemplate(def.Id);
 
-        var template = LoadTemplate(profileId, opt.TemplateName);
+        using var template = ResolveTemplateMat(profileId, opt.EmbeddedPng, opt.TemplateName);
         var match = _vision.FindFeatures(frame, template, new VisionFeatureMatchOptions(
             opt.MinConfidence, roi, opt.ScaleMin, opt.ScaleMax, opt.ScaleSteps, opt.Edge));
 
@@ -133,7 +131,7 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         // Picking (b) skips the template stage entirely so users can compose bar fill on top
         // of another detection's match (e.g. find HUD region first → measure fill within it).
         VisionMatch? bar;
-        bool fromRoi = string.IsNullOrEmpty(opt.TemplateName);
+        bool fromRoi = string.IsNullOrEmpty(opt.TemplateName) && string.IsNullOrEmpty(opt.EmbeddedPng);
         if (fromRoi)
         {
             if (roi is null || roi.Width <= 0 || roi.Height <= 0)
@@ -145,7 +143,7 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         }
         else
         {
-            var template = LoadTemplate(profileId, opt.TemplateName);
+            using var template = ResolveTemplateMat(profileId, opt.EmbeddedPng, opt.TemplateName);
             bar = _vision.Find(frame, template, new FindOptions(
                 opt.MinConfidence, roi, opt.Scale, opt.Grayscale, opt.Pyramid, opt.TemplateEdge));
             if (bar is null)
@@ -257,7 +255,28 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
 
         if (!_effectBaselines.TryGetValue(key, out var baseline))
         {
-            if (!opt.AutoBaseline)
+            if (!string.IsNullOrEmpty(opt.EmbeddedBaselinePng))
+            {
+                // Trainer-pinned baseline. Decode once + cache so subsequent runs reuse it.
+                var bytes = Convert.FromBase64String(opt.EmbeddedBaselinePng);
+                var decoded = Cv2.ImDecode(bytes, ImreadModes.Color);
+                if (decoded.Empty()) throw new OperationException("DETECTION_TEMPLATE_DECODE_FAILED");
+                baseline = decoded;
+                _effectBaselines[key] = baseline;
+            }
+            else if (opt.AutoBaseline)
+            {
+                baseline = SnapshotBaseline(frame, roi);
+                _effectBaselines[key] = baseline;
+                return new DetectionResult
+                {
+                    id = def.Id, name = def.Name, kind = def.Kind,
+                    found = true, triggered = false, value = 0.0,
+                    durationMs = sw.Elapsed.TotalMilliseconds,
+                    match = ToBox(roi.X, roi.Y, roi.Width, roi.Height),
+                };
+            }
+            else
             {
                 return new DetectionResult
                 {
@@ -266,15 +285,6 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
                     durationMs = sw.Elapsed.TotalMilliseconds,
                 };
             }
-            baseline = SnapshotBaseline(frame, roi);
-            _effectBaselines[key] = baseline;
-            return new DetectionResult
-            {
-                id = def.Id, name = def.Name, kind = def.Kind,
-                found = true, triggered = false, value = 0.0,
-                durationMs = sw.Elapsed.TotalMilliseconds,
-                match = ToBox(roi.X, roi.Y, roi.Width, roi.Height),
-            };
         }
 
         var diff = _vision.Diff(frame, baseline, roi, opt.Edge);
@@ -399,5 +409,29 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
             throw new OperationException("DETECTION_TEMPLATE_NOT_FOUND",
                 new() { ["template"] = templateRef }, ex.Message, ex);
         }
+    }
+
+    /// <summary>
+    /// Resolve a template Mat from a definition's options: prefer embedded PNG bytes (the
+    /// detection is self-contained), fall back to the legacy templateRef lookup. Caller owns
+    /// disposal of the returned Mat — embedded path returns a fresh decode each call.
+    /// </summary>
+    private Mat ResolveTemplateMat(string profileId, string? embeddedPng, string templateRef)
+    {
+        if (!string.IsNullOrEmpty(embeddedPng))
+        {
+            var bytes = Convert.FromBase64String(embeddedPng);
+            var mat = Cv2.ImDecode(bytes, ImreadModes.Color);
+            if (mat.Empty())
+            {
+                throw new OperationException("DETECTION_TEMPLATE_DECODE_FAILED");
+            }
+            return mat;
+        }
+        if (string.IsNullOrEmpty(templateRef))
+        {
+            throw new OperationException("DETECTION_TEMPLATE_REQUIRED");
+        }
+        return LoadTemplate(profileId, templateRef);
     }
 }

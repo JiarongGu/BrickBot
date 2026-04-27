@@ -1,4 +1,6 @@
 using BrickBot.Modules.Capture.Models;
+using BrickBot.Modules.Runner.Models;
+using BrickBot.Modules.Runner.Services;
 
 namespace BrickBot.Modules.Script.Services;
 
@@ -17,6 +19,20 @@ public interface IScriptHost
     string TemplateRoot { get; }
     CancellationToken Cancellation { get; }
 
+    /// <summary>Auto-stop config the runner / JS-side checks each tick. Null when no conditions set.</summary>
+    StopWhenOptions? StopWhen { get; }
+
+    /// <summary>Reason the run is stopping. Set by <see cref="RequestStop"/>; read by the runner
+    /// after the engine exits to populate <see cref="RunnerState.StoppedReason"/>.</summary>
+    StopReason StoppedReason { get; }
+
+    /// <summary>Free-form detail (e.g. "ctx.fishCount >= 100 (was 102)" / event name / etc.).</summary>
+    string? StoppedDetail { get; }
+
     void EnsureNotCancelled();
     CaptureFrame GrabFrame();
+
+    /// <summary>Trigger graceful shutdown with a reason. Idempotent — first reason wins. Cancels
+    /// the run's cancellation token so any waiting <c>wait()</c> / vision call wakes immediately.</summary>
+    void RequestStop(StopReason reason, string? detail);
 }

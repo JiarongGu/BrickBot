@@ -47,11 +47,16 @@ export function useRunner() {
     if (!store.selectedWindow) throw new Error('Pick a window first.');
     if (!activeProfileId) throw new Error('No active profile.');
     if (!store.selectedMain) throw new Error('Pick a main script first.');
+    // Drop the stopWhen object entirely if every field is empty so the backend gets a true
+    // "no auto-stop" signal rather than an object with all-undefined fields.
+    const sw = store.stopWhen;
+    const hasStopWhen = sw.timeoutMs || sw.onEvent || sw.ctxKey;
     const next = await runnerService.start({
       windowHandle: store.selectedWindow.handle,
       profileId: activeProfileId,
       mainName: store.selectedMain,
       templateRoot: store.templateRoot,
+      stopWhen: hasStopWhen ? sw : undefined,
     });
     store.setState(next);
   };

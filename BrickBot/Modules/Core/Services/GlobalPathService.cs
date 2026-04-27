@@ -37,6 +37,11 @@ public interface IGlobalPathService
     /// <summary>Profile detections (typed vision rules): data/profiles/{profileId}/detections/</summary>
     string GetProfileDetectionsDirectory(string profileId);
 
+    /// <summary>Profile recordings root. Each recording lives at
+    /// <c>data/profiles/{profileId}/recordings/{recordingId}/</c> with one PNG per frame
+    /// plus a JSON metadata file listing the frames in capture order.</summary>
+    string GetProfileRecordingsDirectory(string profileId);
+
     /// <summary>Profile-scoped SQLite database file: data/profiles/{profileId}/profile.db. Holds
     /// detections, templates metadata, and training-sample records — managed by FluentMigrator.</summary>
     string GetProfileDatabasePath(string profileId);
@@ -92,6 +97,9 @@ public sealed class GlobalPathService : IGlobalPathService
 
     public string GetProfileDetectionsDirectory(string profileId) =>
         Path.Combine(GetProfileDirectoryPath(profileId), "detections");
+
+    public string GetProfileRecordingsDirectory(string profileId) =>
+        Path.Combine(GetProfileDirectoryPath(profileId), "recordings");
 
     public string GetProfileDatabasePath(string profileId) =>
         Path.Combine(GetProfileDirectoryPath(profileId), "profile.db");

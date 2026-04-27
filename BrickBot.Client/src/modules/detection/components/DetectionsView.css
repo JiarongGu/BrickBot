@@ -45,8 +45,12 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  padding: 64px 32px;
+  padding: 32px;
   text-align: center;
+  /* Fill the scrollable body so the empty-state CTA sits in the vertical middle of the
+     viewport rather than sticking to the top. */
+  min-height: 100%;
+  box-sizing: border-box;
 }
 
 .detections-view__empty-icon {

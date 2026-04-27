@@ -12,6 +12,7 @@ import {
   CompactSelect,
   CompactSpace,
 } from '@/shared/components/compact';
+import { WindowSelector } from '@/shared/components/common';
 import { useRunner } from './hooks/useRunner';
 import type { RunnerStatus } from './types';
 
@@ -50,17 +51,14 @@ export const RunnerPage: React.FC = () => {
       <CompactSpace direction="vertical" style={{ width: '100%' }}>
         <CompactCard extraCompact title={t('runner.targetWindow', 'Target window')}>
           <CompactSpace direction="vertical" style={{ width: '100%' }}>
-            <CompactSelect
-              showSearch
-              placeholder={t('runner.pickWindow', 'Pick a window')}
+            <WindowSelector
               value={r.selectedWindow?.handle}
-              onChange={(handle) => r.selectWindow(r.windows.find((w) => w.handle === handle))}
-              filterOption={(input, opt) => String(opt?.label ?? '').toLowerCase().includes(input.toLowerCase())}
-              options={r.windows.map((w) => ({
-                value: w.handle,
-                label: `${w.title} (${w.processName}) ${w.width}x${w.height}`,
-              }))}
+              onChange={(_, info) => r.selectWindow(info)}
+              windows={r.windows}
+              showRefresh={false}
+              autoSelectFirst={false}
               style={{ width: '100%' }}
+              minWidth={0}
             />
             <CompactButton onClick={() => r.refreshWindows()} block size="small">
               {t('runner.refreshWindows', 'Refresh windows')}
@@ -94,9 +92,69 @@ export const RunnerPage: React.FC = () => {
           />
         </CompactCard>
 
+        <CompactCard extraCompact title={t('runner.stopWhen', 'Auto-stop conditions')}>
+          <CompactSpace direction="vertical" style={{ width: '100%' }}>
+            <CompactSelect
+              placeholder={t('runner.stopWhen.timeout', 'Timeout (none)')}
+              value={r.stopWhen.timeoutMs}
+              onChange={(v) => r.setStopWhen({ timeoutMs: v as number | undefined })}
+              allowClear
+              options={[
+                { value: 60_000, label: '1 minute' },
+                { value: 5 * 60_000, label: '5 minutes' },
+                { value: 15 * 60_000, label: '15 minutes' },
+                { value: 30 * 60_000, label: '30 minutes' },
+                { value: 60 * 60_000, label: '1 hour' },
+                { value: 4 * 60 * 60_000, label: '4 hours' },
+              ]}
+              style={{ width: '100%' }}
+            />
+            <CompactInput
+              placeholder={t('runner.stopWhen.event', 'Stop on event (e.g. goalReached)') as string}
+              value={r.stopWhen.onEvent ?? ''}
+              onChange={(e) => r.setStopWhen({ onEvent: e.target.value || undefined })}
+            />
+            <CompactSpace style={{ width: '100%' }}>
+              <CompactInput
+                placeholder={t('runner.stopWhen.ctxKey', 'ctx key') as string}
+                value={r.stopWhen.ctxKey ?? ''}
+                onChange={(e) => r.setStopWhen({ ctxKey: e.target.value || undefined })}
+                style={{ flex: 1 }}
+              />
+              <CompactSelect
+                value={r.stopWhen.ctxOp ?? 'eq'}
+                onChange={(v) => r.setStopWhen({ ctxOp: v as string })}
+                options={[
+                  { value: 'eq', label: '=' },
+                  { value: 'neq', label: '≠' },
+                  { value: 'gt', label: '>' },
+                  { value: 'gte', label: '≥' },
+                  { value: 'lt', label: '<' },
+                  { value: 'lte', label: '≤' },
+                ]}
+                style={{ width: 70 }}
+              />
+              <CompactInput
+                placeholder={t('runner.stopWhen.ctxValue', 'value') as string}
+                value={r.stopWhen.ctxValue ?? ''}
+                onChange={(e) => r.setStopWhen({ ctxValue: e.target.value || undefined })}
+                style={{ flex: 1 }}
+              />
+            </CompactSpace>
+          </CompactSpace>
+        </CompactCard>
+
         <CompactCard extraCompact title={t('runner.run', 'Run')}>
           <CompactSpace direction="vertical" style={{ width: '100%' }}>
-            <Tag color={STATUS_COLORS[r.state.status]}>{r.state.status.toUpperCase()}</Tag>
+            <CompactSpace size={4}>
+              <Tag color={STATUS_COLORS[r.state.status]}>{r.state.status.toUpperCase()}</Tag>
+              {r.state.stoppedReason && r.state.stoppedReason !== 'none' && r.state.status === 'idle' && (
+                <Tag color={r.state.stoppedReason === 'faulted' ? 'red' : 'blue'}>
+                  {t('runner.stopReason', 'stopped: {{reason}}', { reason: r.state.stoppedReason })}
+                  {r.state.stoppedDetail ? ` · ${r.state.stoppedDetail}` : ''}
+                </Tag>
+              )}
+            </CompactSpace>
             {r.state.errorMessage && <Typography.Text type="danger">{r.state.errorMessage}</Typography.Text>}
             <CompactSpace>
               <CompactPrimaryButton icon={<PlayCircleOutlined />} disabled={!canStart} onClick={() => r.start()}>

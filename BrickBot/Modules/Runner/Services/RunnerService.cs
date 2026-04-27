@@ -23,6 +23,7 @@ public sealed class RunnerService : IRunnerService
     private readonly object _lock = new();
     private CancellationTokenSource? _cts;
     private Thread? _thread;
+    private ScriptHost? _activeHost;
     private RunnerState _state = new(RunnerStatus.Idle);
 
     public RunnerService(
@@ -75,7 +76,8 @@ public sealed class RunnerService : IRunnerService
             var availableLibraries = _scriptFiles.ListCompiledLibraries(profileId);
 
             _cts = new CancellationTokenSource();
-            var ct = _cts.Token;
+            var cts = _cts;
+            var ct = cts.Token;
 
             var host = new ScriptHost(
                 _capture,
@@ -84,7 +86,9 @@ public sealed class RunnerService : IRunnerService
                 window.X,
                 window.Y,
                 request.TemplateRoot,
-                ct);
+                cts,
+                request.StopWhen);
+            _activeHost = host;
 
             var context = new ScriptContext();
 
@@ -94,6 +98,23 @@ public sealed class RunnerService : IRunnerService
 
             UpdateState(new RunnerState(RunnerStatus.Running));
             _log.Info($"Run started against \"{window.Title}\" ({window.Width}x{window.Height}) — main: {request.MainName}, libraries available: {availableLibraries.Count}");
+            if (request.StopWhen is { } sw)
+            {
+                _log.Info($"Stop conditions: " +
+                    (sw.TimeoutMs.HasValue ? $"timeout={sw.TimeoutMs}ms " : "") +
+                    (string.IsNullOrEmpty(sw.OnEvent) ? "" : $"onEvent='{sw.OnEvent}' ") +
+                    (string.IsNullOrEmpty(sw.CtxKey) ? "" : $"ctx['{sw.CtxKey}'] {sw.CtxOp ?? "eq"} {sw.CtxValue}"));
+            }
+
+            // Timeout watchdog. Runs independently of the script thread so it trips even when the
+            // script blocks on a long vision call (which never gets back to runForever to check).
+            if (request.StopWhen?.TimeoutMs is int timeoutMs && timeoutMs > 0)
+            {
+                _ = Task.Delay(timeoutMs, ct).ContinueWith(t =>
+                {
+                    if (!t.IsCanceled) host.RequestStop(StopReason.Timeout, $"{timeoutMs}ms elapsed");
+                }, TaskScheduler.Default);
+            }
 
             _thread = new Thread(() => RunLoop(host, run, context, ct))
             {
@@ -106,47 +127,57 @@ public sealed class RunnerService : IRunnerService
 
     public void Stop()
     {
-        CancellationTokenSource? cts;
+        ScriptHost? host;
         lock (_lock)
         {
             if (_state.Status != RunnerStatus.Running) return;
             UpdateState(new RunnerState(RunnerStatus.Stopping));
-            cts = _cts;
+            host = _activeHost;
         }
 
-        cts?.Cancel();
+        // RequestStop is the single shutdown path — it sets StoppedReason=User AND cancels the
+        // CTS so blocked vision/wait calls wake up. Plain cts.Cancel() would race the JS-side
+        // stop-reason write and lose the "user clicked stop" signal.
+        host?.RequestStop(StopReason.User, "user");
     }
 
-    private void RunLoop(IScriptHost host, ScriptRunRequest run, ScriptContext context, CancellationToken ct)
+    private void RunLoop(ScriptHost host, ScriptRunRequest run, ScriptContext context, CancellationToken ct)
     {
         try
         {
             _scriptEngine.Execute(run, host, context);
-            _log.Info("Script completed.");
-            UpdateState(new RunnerState(RunnerStatus.Idle));
+            // Script returned naturally — main didn't call runForever or it exited cleanly.
+            var reason = host.StoppedReason == StopReason.None ? StopReason.Completed : host.StoppedReason;
+            _log.Info($"Script completed ({reason}).");
+            UpdateState(new RunnerState(RunnerStatus.Idle, StoppedReason: reason, StoppedDetail: host.StoppedDetail));
         }
         catch (OperationCanceledException)
         {
-            _log.Info("Run cancelled.");
-            UpdateState(new RunnerState(RunnerStatus.Idle));
+            // Cancelled either by user, timeout watchdog, or script-side brickbot.stop() / event /
+            // ctx predicate trigger. host.StoppedReason carries the precise reason — fall back to
+            // User if nobody set one (defensive).
+            var reason = host.StoppedReason == StopReason.None ? StopReason.User : host.StoppedReason;
+            _log.Info($"Run stopped ({reason}{(host.StoppedDetail is null ? "" : $": {host.StoppedDetail}")}).");
+            UpdateState(new RunnerState(RunnerStatus.Idle, StoppedReason: reason, StoppedDetail: host.StoppedDetail));
         }
         catch (OperationException op)
         {
             _logger.LogWarning(op, "Run aborted: {Code}", op.Code);
             _log.Error($"{op.Code}: {op.Message}");
-            UpdateState(new RunnerState(RunnerStatus.Faulted, op.Message));
+            UpdateState(new RunnerState(RunnerStatus.Faulted, op.Message, StopReason.Faulted, op.Code));
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unhandled run failure");
             _log.Error(ex.Message);
-            UpdateState(new RunnerState(RunnerStatus.Faulted, ex.Message));
+            UpdateState(new RunnerState(RunnerStatus.Faulted, ex.Message, StopReason.Faulted, ex.Message));
         }
         finally
         {
             // Clear dispatcher state so the UI's Actions panel updates back to empty
             // even when a faulted run leaves stale registrations behind.
             _dispatcher.Reset();
+            lock (_lock) _activeHost = null;
         }
     }
 

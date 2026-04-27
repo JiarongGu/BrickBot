@@ -1,0 +1,138 @@
+.recordings-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px 24px;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.recordings-view__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.recordings-view__title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-base);
+}
+
+.recordings-view__count {
+  color: var(--color-text-tertiary);
+  margin-left: 4px;
+  font-weight: normal;
+}
+
+.recordings-view__body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.recordings-view__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px;
+  text-align: center;
+  /* Fill the scrollable body so the empty-state CTA sits in the vertical middle. */
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+.recordings-view__empty-icon { font-size: 48px; color: var(--color-text-tertiary); }
+.recordings-view__empty-title { font-size: 14px; color: var(--color-text-base); }
+.recordings-view__empty-hint { font-size: 12px; color: var(--color-text-tertiary); max-width: 480px; line-height: 1.5; }
+
+.recording-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+}
+
+.recording-card {
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-base);
+  padding: 8px 10px;
+  cursor: pointer;
+  background: var(--color-card-bg);
+  transition: border-color 0.15s, background 0.15s;
+}
+.recording-card:hover { border-color: var(--color-primary); }
+
+.recording-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.recording-card__name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-base);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.recording-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+/* Player — fills available height; image is object-fit: contain so the full frame is always visible. */
+.recording-player {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  height: 100%;
+  min-height: 0;
+}
+
+.recording-player__canvas-wrap {
+  flex: 1;
+  background: #0a0a0a;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  overflow: hidden;
+}
+
+.recording-player__canvas {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.recording-player__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-base);
+}
+
+.recording-player__frame-info {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  min-width: 110px;
+  font-family: source-code-pro, Menlo, Monaco, Consolas, monospace;
+}

@@ -6,6 +6,7 @@ using BrickBot.Modules.Detection.Models;
 using BrickBot.Modules.Detection.Services;
 using BrickBot.Modules.Input.Models;
 using BrickBot.Modules.Input.Services;
+using BrickBot.Modules.Runner.Models;
 using BrickBot.Modules.Runner.Services;
 using BrickBot.Modules.Template.Services;
 using BrickBot.Modules.Vision.Models;
@@ -282,6 +283,44 @@ public sealed class HostApi : IDisposable
     /// Returns null when nothing is queued.</summary>
     public string? tryDequeueAction() => _dispatcher.TryDequeueInvocation();
 
+    // ---------------- Stop conditions ----------------
+    // The C# runner owns the timeout watchdog (so stuck blocking calls still trip the timeout);
+    // the JS-side runForever() handles event + ctx-predicate checks each tick. This split keeps
+    // the runtime watchdog independent of whether the user's script ever yields control.
+
+    /// <summary>StopWhen options shape for JS — null when no stop conditions configured. Returned
+    /// once at engine boot so the JS-side stdlib can install the right monitors without polling.</summary>
+    public StopWhenJs? stopWhen()
+    {
+        var sw = _host.StopWhen;
+        if (sw is null) return null;
+        return new StopWhenJs
+        {
+            timeoutMs = sw.TimeoutMs,
+            onEvent = sw.OnEvent,
+            ctxKey = sw.CtxKey,
+            ctxOp = sw.CtxOp,
+            ctxValue = sw.CtxValue,
+        };
+    }
+
+    /// <summary>Request graceful shutdown from JS (e.g. <c>brickbot.stop('done')</c>). The first
+    /// caller wins — subsequent calls are no-ops so a User stop in flight isn't overwritten.</summary>
+    public void requestStop(string reason, string? detail)
+    {
+        var parsed = reason switch
+        {
+            "user" => StopReason.User,
+            "timeout" => StopReason.Timeout,
+            "event" => StopReason.Event,
+            "context" or "ctx" => StopReason.Context,
+            "completed" or "done" => StopReason.Completed,
+            "faulted" or "error" => StopReason.Faulted,
+            _ => StopReason.Script,
+        };
+        _host.RequestStop(parsed, detail);
+    }
+
     // ---------------- Detection ----------------
     // Typed, named vision rules persisted at data/profiles/{id}/detections/*.json. The JS-side
     // stdlib (StdLib.cs InitScript) wraps these into the ergonomic `detect.*` global and applies
@@ -358,6 +397,16 @@ public sealed class HostApi : IDisposable
         "middle" => MouseButton.Middle,
         _ => MouseButton.Left,
     };
+}
+
+/// <summary>JS-friendly StopWhen shape — Jint surfaces these props as plain JS object fields.</summary>
+public sealed class StopWhenJs
+{
+    public int? timeoutMs { get; init; }
+    public string? onEvent { get; init; }
+    public string? ctxKey { get; init; }
+    public string? ctxOp { get; init; }
+    public string? ctxValue { get; init; }
 }
 
 /// <summary>JS-friendly match POCO. Jint surfaces fields/properties to the script.</summary>

@@ -7,6 +7,7 @@ import { RunnerPage } from '@/modules/runner/RunnerPage';
 import { ScriptsView } from '@/modules/script';
 import { ToolsView } from '@/modules/tool';
 import { DetectionsView } from '@/modules/detection';
+import { RecordingsView } from '@/modules/recording';
 import { initProfiles } from '@/modules/profile';
 import { SettingsPanel, initSettings, useSettingsStore } from '@/modules/setting';
 import './styles/theme-colors.css';
@@ -65,6 +66,8 @@ export const App: React.FC = () => {
               <ScriptsView />
             ) : tab === 'detections' ? (
               <DetectionsView />
+            ) : tab === 'recordings' ? (
+              <RecordingsView />
             ) : tab === 'tools' ? (
               <ToolsView />
             ) : (

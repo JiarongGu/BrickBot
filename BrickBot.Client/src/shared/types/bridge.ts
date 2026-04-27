@@ -7,6 +7,7 @@ export type ModuleName =
   | 'INPUT'
   | 'TEMPLATE'
   | 'DETECTION'
+  | 'RECORDING'
   | 'SCRIPT'
   | 'RUNNER'
   | 'PROFILE'

@@ -34,8 +34,9 @@
       "Bash(git config *)",
       "Bash(git add *)",
       "Bash(echo \"---exit $?\")",
-      "Read(//d/Development/D3dxSkinManager/**)",
-      "Bash(echo \"---tsc $?\")"
+      "Bash(echo \"---tsc $?\")",
+      "Bash(echo \"exit=$?\")",
+      "Bash(tasklist)"
     ],
     "additionalDirectories": [
       ".claude",

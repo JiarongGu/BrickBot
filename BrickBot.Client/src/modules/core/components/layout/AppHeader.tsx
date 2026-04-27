@@ -6,6 +6,7 @@ import {
   PlayCircleOutlined,
   SettingOutlined,
   ToolOutlined,
+  VideoCameraOutlined,
 } from '@ant-design/icons';
 import classNames from 'classnames';
 import { useTranslation } from 'react-i18next';
@@ -15,7 +16,7 @@ import './AppHeader.css';
 
 const { Header } = Layout;
 
-export type AppTab = 'runner' | 'scripts' | 'detections' | 'tools' | 'settings';
+export type AppTab = 'runner' | 'scripts' | 'detections' | 'recordings' | 'tools' | 'settings';
 
 interface TabItem {
   key: AppTab;
@@ -43,6 +44,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({ selectedTab, onTabChange, 
       { key: 'runner', icon: <PlayCircleOutlined />, label: t('app.menu.runner') },
       { key: 'scripts', icon: <CodeOutlined />, label: t('app.menu.scripts', 'Scripts') },
       { key: 'detections', icon: <AimOutlined />, label: t('app.menu.detections', 'Detections') },
+      { key: 'recordings', icon: <VideoCameraOutlined />, label: t('app.menu.recordings', 'Recordings') },
       { key: 'tools', icon: <ToolOutlined />, label: t('app.menu.tools', 'Tools') },
       { key: 'settings', icon: <SettingOutlined />, label: t('app.menu.settings') },
     ],

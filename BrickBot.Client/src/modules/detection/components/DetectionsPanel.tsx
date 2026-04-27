@@ -7,7 +7,6 @@ import {
   ExperimentOutlined,
   PlayCircleOutlined,
   PlusOutlined,
-  ReloadOutlined,
   SaveOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -20,9 +19,9 @@ import {
   CompactSelect,
   CompactSpace,
 } from '@/shared/components/compact';
+import { WindowSelector } from '@/shared/components/common';
 import { useProfileStore } from '@/modules/profile';
 import { captureService } from '@/modules/runner/services/captureService';
-import type { WindowInfo } from '@/modules/runner/types';
 import { templateService } from '@/modules/template';
 import type { TemplateInfo } from '@/modules/template';
 import { detectionService } from '../services/detectionService';
@@ -74,7 +73,6 @@ export const DetectionsPanel: React.FC = () => {
   const setDraft = useDetectionStore((s) => s.setDraft);
   const setResult = useDetectionStore((s) => s.setResult);
 
-  const [windows, setWindows] = useState<WindowInfo[]>([]);
   const [windowHandle, setWindowHandle] = useState<number | undefined>();
   const [capture, setCapture] = useState<CaptureState | undefined>();
   const [grabbing, setGrabbing] = useState(false);
@@ -89,12 +87,6 @@ export const DetectionsPanel: React.FC = () => {
 
   // ---------- bootstrap ----------
 
-  const refreshWindows = useCallback(async () => {
-    const list = await captureService.listWindows();
-    setWindows(list);
-    if (list.length > 0 && !windowHandle) setWindowHandle(list[0].handle);
-  }, [windowHandle]);
-
   const refreshDetections = useCallback(async () => {
     if (!profileId) return;
     const { detections: defs } = await detectionService.list(profileId);
@@ -107,7 +99,6 @@ export const DetectionsPanel: React.FC = () => {
     setTemplates(list);
   }, [profileId]);
 
-  useEffect(() => { void refreshWindows(); }, [refreshWindows]);
   useEffect(() => { void refreshDetections(); }, [refreshDetections]);
   useEffect(() => { void refreshTemplates(); }, [refreshTemplates]);
 
@@ -285,21 +276,11 @@ export const DetectionsPanel: React.FC = () => {
       {/* Top bar — window picker + capture */}
       <div className="detections-panel__bar">
         <CompactSpace wrap>
-          <CompactSelect
-            showSearch
-            placeholder={t('runner.pickWindow', 'Pick a window')}
+          <WindowSelector
             value={windowHandle}
             onChange={setWindowHandle}
-            filterOption={(input, opt) => String(opt?.label ?? '').toLowerCase().includes(input.toLowerCase())}
-            options={windows.map((w) => ({
-              value: w.handle,
-              label: `${w.title} — ${w.processName} ${w.width}×${w.height}`,
-            }))}
-            style={{ minWidth: 320 }}
+            minWidth={320}
           />
-          <Tooltip title={t('runner.refreshWindows', 'Refresh windows')}>
-            <CompactButton icon={<ReloadOutlined />} onClick={refreshWindows} />
-          </Tooltip>
           <CompactPrimaryButton icon={<CameraOutlined />} loading={grabbing} onClick={grab}>
             {t('detection.grab', 'Capture frame')}
           </CompactPrimaryButton>

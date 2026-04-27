@@ -10,7 +10,6 @@ import {
   PercentageOutlined,
   PlayCircleOutlined,
   PushpinOutlined,
-  ReloadOutlined,
   ScissorOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
@@ -26,10 +25,10 @@ import {
   CompactSelect,
   CompactSpace,
 } from '@/shared/components/compact';
+import { WindowSelector } from '@/shared/components/common';
 import { FormDialog } from '@/shared/components/dialogs';
 import { useProfileStore } from '@/modules/profile';
 import { captureService } from '@/modules/runner/services/captureService';
-import type { WindowInfo } from '@/modules/runner/types';
 import { useEditorBridgeStore } from '@/modules/script/store/editorBridgeStore';
 import {
   visionService,
@@ -79,7 +78,6 @@ export const CapturePanel: React.FC = () => {
   const { t } = useTranslation();
   const profileId = useProfileStore((s) => s.activeProfileId);
 
-  const [windows, setWindows] = useState<WindowInfo[]>([]);
   const [windowHandle, setWindowHandle] = useState<number | undefined>();
   const [capture, setCapture] = useState<CaptureState | undefined>();
   const [grabbing, setGrabbing] = useState(false);
@@ -103,12 +101,6 @@ export const CapturePanel: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
-  const refreshWindows = useCallback(async () => {
-    const list = await captureService.listWindows();
-    setWindows(list);
-    if (list.length > 0 && !windowHandle) setWindowHandle(list[0].handle);
-  }, [windowHandle]);
-
   const refreshTemplates = useCallback(async () => {
     if (!profileId) return;
     const { templates: list } = await templateService.list(profileId);
@@ -116,7 +108,6 @@ export const CapturePanel: React.FC = () => {
     if (!tplConfig.name && list.length > 0) setTplConfig((c) => ({ ...c, name: list[0].name }));
   }, [profileId, tplConfig.name]);
 
-  useEffect(() => { void refreshWindows(); }, [refreshWindows]);
   useEffect(() => { void refreshTemplates(); }, [refreshTemplates]);
 
   const grab = useCallback(async () => {
@@ -416,21 +407,11 @@ export const CapturePanel: React.FC = () => {
       {/* Row 1 — capture bar: window picker + Capture button. */}
       <div className="capture-panel__bar">
         <CompactSpace wrap>
-          <CompactSelect
-            showSearch
-            placeholder={t('runner.pickWindow', 'Pick a window')}
+          <WindowSelector
             value={windowHandle}
             onChange={setWindowHandle}
-            filterOption={(input, opt) => String(opt?.label ?? '').toLowerCase().includes(input.toLowerCase())}
-            options={windows.map((w) => ({
-              value: w.handle,
-              label: `${w.title} — ${w.processName} [${w.className}] ${w.width}×${w.height}`,
-            }))}
-            style={{ minWidth: 320 }}
+            minWidth={320}
           />
-          <Tooltip title={t('runner.refreshWindows', 'Refresh windows')}>
-            <CompactButton icon={<ReloadOutlined />} onClick={refreshWindows} />
-          </Tooltip>
           <CompactPrimaryButton icon={<CameraOutlined />} loading={grabbing} onClick={grab}>
             {t('capture.grab', 'Capture')}
           </CompactPrimaryButton>

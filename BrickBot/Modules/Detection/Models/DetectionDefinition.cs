@@ -111,7 +111,14 @@ public sealed class DetectionRoi
 
 public sealed class TemplateOptions
 {
+    /// <summary>Legacy: id of a Templates-table row. Trainer-built definitions populate
+    /// <see cref="EmbeddedPng"/> instead; runtime checks Embedded first, then falls back here.</summary>
     public string TemplateName { get; set; } = "";
+
+    /// <summary>Base64-encoded PNG embedded directly in the detection. Self-contained — no
+    /// external Templates-table dependency. Trainer auto-populates from positive samples.</summary>
+    public string? EmbeddedPng { get; set; }
+
     public double MinConfidence { get; set; } = 0.85;
     public double Scale { get; set; } = 1.0;
     public bool Grayscale { get; set; } = true;
@@ -125,10 +132,13 @@ public sealed class TemplateOptions
 
 public sealed class ProgressBarOptions
 {
-    /// <summary>Template that frames the bar's bbox. Strip auto-discovered inside it at run time.
-    /// Optional when <see cref="DetectionDefinition.Roi"/> uses <see cref="DetectionRoi.FromDetectionId"/>
-    /// or has an explicit anchored ROI — in those cases the bbox is supplied directly.</summary>
+    /// <summary>Legacy template id (Templates-table row). Optional — trainer-built definitions
+    /// embed the bar bbox via <see cref="EmbeddedPng"/> or rely on the detection's ROI directly.</summary>
     public string TemplateName { get; set; } = "";
+
+    /// <summary>Base64-encoded PNG of the bar bbox template. Auto-populated by the trainer.</summary>
+    public string? EmbeddedPng { get; set; }
+
     public double MinConfidence { get; set; } = 0.80;
 
     /// <summary>Match the bar's bbox in edge space — survives the case where the saved
@@ -192,6 +202,11 @@ public sealed class EffectOptions
     /// for "is the screen flashing right now" without authoring a separate baseline asset.</summary>
     public bool AutoBaseline { get; set; } = true;
 
+    /// <summary>Base64-encoded PNG of an explicit baseline image (the "quiet" state). When set,
+    /// the runner uses this instead of the first runtime frame, so the trainer can pin the
+    /// baseline to a known-good sample rather than gambling on whatever the script sees first.</summary>
+    public string? EmbeddedBaselinePng { get; set; }
+
     /// <summary>Compare in Canny edge space instead of raw pixels. Catches shape changes
     /// (icon swaps, buff appears) without false-positives from lighting / color shifts.</summary>
     public bool Edge { get; set; }
@@ -200,6 +215,8 @@ public sealed class EffectOptions
 public sealed class FeatureMatchOptions
 {
     public string TemplateName { get; set; } = "";
+    /// <summary>Base64-encoded PNG of the template. Auto-populated by the trainer.</summary>
+    public string? EmbeddedPng { get; set; }
     public double MinConfidence { get; set; } = 0.80;
     public double ScaleMin { get; set; } = 0.9;
     public double ScaleMax { get; set; } = 1.1;
@@ -237,6 +254,43 @@ public sealed class DetectionOutput
 
     /// <summary>Overlay rendering hints. Read by future GameOverlay; runner publishes them anyway.</summary>
     public DetectionOverlay? Overlay { get; set; }
+
+    /// <summary>Primary output shape — drives <see cref="DetectionResult.typedValue"/>. Each kind
+    /// has a sensible default (ProgressBar → number, ColorPresence → bboxes, Effect → boolean,
+    /// Template/FeatureMatch → bbox, Region → bbox) but the user can override (e.g. ColorPresence
+    /// with output=number returns the count instead of the blob list).</summary>
+    public DetectionOutputType? Type { get; set; }
+
+    /// <summary>Optional debounce — only emit the result when the value has been stable for at
+    /// least <see cref="DetectionStability.MinDurationMs"/>. Filters out single-frame flicker.</summary>
+    public DetectionStability? Stability { get; set; }
+}
+
+/// <summary>Output value shape — serialized as camelCase string by JsonStringEnumConverter.</summary>
+public enum DetectionOutputType
+{
+    /// <summary>found / not-found.</summary>
+    Boolean,
+    /// <summary>Numeric — fill ratio, count, similarity.</summary>
+    Number,
+    /// <summary>Text — OCR result or label-mapped enum.</summary>
+    Text,
+    /// <summary>Single bounding rectangle.</summary>
+    Bbox,
+    /// <summary>List of bounding rectangles.</summary>
+    Bboxes,
+    /// <summary>Center point (cx, cy).</summary>
+    Point,
+}
+
+/// <summary>Stability filter — value must be stable for the full window before being returned.
+/// JS-side wrapper compares incoming value against the last-seen value; if they differ the
+/// stability window restarts. <see cref="Tolerance"/> permits small numeric jitter to count
+/// as "same value" (e.g. HP bar reading 0.501 vs 0.502 between frames).</summary>
+public sealed class DetectionStability
+{
+    public int MinDurationMs { get; set; }
+    public double Tolerance { get; set; }
 }
 
 public sealed class DetectionOverlay

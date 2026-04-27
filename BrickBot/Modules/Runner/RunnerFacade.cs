@@ -42,8 +42,9 @@ public sealed class RunnerFacade : BaseFacade
         var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
         var mainName = _payload.GetRequiredValue<string>(request.Payload, "mainName");
         var templateRoot = _payload.GetOptionalValue<string>(request.Payload, "templateRoot") ?? string.Empty;
+        var stopWhen = _payload.GetOptionalValue<StopWhenOptions>(request.Payload, "stopWhen");
 
-        _service.Start(new RunRequest(windowHandle, profileId, mainName, templateRoot));
+        _service.Start(new RunRequest(windowHandle, profileId, mainName, templateRoot, stopWhen));
         return _service.State;
     }
 

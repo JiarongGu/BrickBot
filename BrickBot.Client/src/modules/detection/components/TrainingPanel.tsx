@@ -6,7 +6,6 @@ import {
   DeleteOutlined,
   InboxOutlined,
   PlayCircleOutlined,
-  ReloadOutlined,
   StopOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
@@ -22,10 +21,11 @@ import {
   CompactSelect,
   CompactSpace,
 } from '@/shared/components/compact';
+import { WindowSelector } from '@/shared/components/common';
 import { useProfileStore } from '@/modules/profile';
 import { captureService } from '@/modules/runner/services/captureService';
-import type { WindowInfo } from '@/modules/runner/types';
 import { detectionService } from '../services/detectionService';
+import { recordingService } from '@/modules/recording';
 import { newDetection } from '../types';
 import type {
   DetectionDefinition,
@@ -429,17 +429,30 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
   const [draft, setDraft] = useState<DetectionDefinition>(() =>
     reTrainDetection ? JSON.parse(JSON.stringify(reTrainDetection)) : newDetection('progressBar'),
   );
-  const [windows, setWindows] = useState<WindowInfo[]>([]);
   const [windowHandle, setWindowHandle] = useState<number | undefined>();
   const [samples, setSamples] = useState<SampleRow[]>([]);
   const [selected, setSelected] = useState<number>(0);
 
-  const [captureMode, setCaptureMode] = useState<'snapshot' | 'record'>('snapshot');
+  const [captureMode, setCaptureMode] = useState<'snapshot' | 'record' | 'recording'>('snapshot');
+  const [recordings, setRecordings] = useState<{ id: string; name: string; frameCount: number }[]>([]);
+  const [pickedRecordingId, setPickedRecordingId] = useState<string | undefined>();
+  const [loadingFromRecording, setLoadingFromRecording] = useState(false);
+  /** Frame subset filter — start / end are inclusive frame indices, stride 1 = every frame. */
+  const [frameRangeStart, setFrameRangeStart] = useState(0);
+  const [frameRangeEnd, setFrameRangeEnd] = useState(0);
+  const [frameStride, setFrameStride] = useState(1);
   const [recordIntervalMs, setRecordIntervalMs] = useState(500);
   const [recordDurationS, setRecordDurationS] = useState(10);
   const [recording, setRecording] = useState(false);
+  /** 0..1 progress through the active recording, ticking every 100ms so the bar animates. */
+  const [recordProgress, setRecordProgress] = useState(0);
   const recordTimerRef = useRef<number | null>(null);
+  const recordProgressTimerRef = useRef<number | null>(null);
+  const recordStartRef = useRef<number>(0);
   const recordEndRef = useRef<number>(0);
+  /** Brief snapshot flash overlay key — bumped each capture so the CSS animation re-fires.
+   *  Currently consumed by a small header pulse; could drive a canvas-wrap overlay later. */
+  const [flashKey, setFlashKey] = useState(0);
 
   const [trainingResult, setTrainingResult] = useState<TrainingResult | undefined>();
   const [training, setTraining] = useState(false);
@@ -460,16 +473,79 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
 
   // ---------- bootstrap ----------
 
-  const refreshWindows = useCallback(async () => {
-    const list = await captureService.listWindows();
-    setWindows(list);
-    if (list.length > 0 && !windowHandle) setWindowHandle(list[0].handle);
-  }, [windowHandle]);
+  // Cleanup record timers on unmount
+  useEffect(() => () => {
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    if (recordProgressTimerRef.current) clearInterval(recordProgressTimerRef.current);
+  }, []);
 
-  useEffect(() => { void refreshWindows(); }, [refreshWindows]);
+  // Auto-select the newest sample so users see what they just captured in the preview pane.
+  // The strip auto-scrolls because the active row has a different background — the layout
+  // doesn't need an explicit scrollIntoView.
+  useEffect(() => {
+    if (samples.length === 0) return;
+    setSelected(samples.length - 1);
+  }, [samples.length]);
 
-  // Cleanup record timer on unmount
-  useEffect(() => () => { if (recordTimerRef.current) clearInterval(recordTimerRef.current); }, []);
+  // Load recordings list when entering Samples step or switching modes.
+  useEffect(() => {
+    if (!profileId) return;
+    recordingService.list(profileId)
+      .then((r) => setRecordings(r.recordings.map((rec) => ({ id: rec.id, name: rec.name, frameCount: rec.frameCount }))))
+      .catch(() => undefined);
+  }, [profileId]);
+
+  // Auto-fill the range when the user picks a recording so the inputs reflect "all frames"
+  // without forcing them to type the upper bound by hand.
+  useEffect(() => {
+    if (!pickedRecordingId) return;
+    const meta = recordings.find((r) => r.id === pickedRecordingId);
+    if (!meta) return;
+    setFrameRangeStart(0);
+    setFrameRangeEnd(Math.max(0, meta.frameCount - 1));
+    setFrameStride(1);
+  }, [pickedRecordingId, recordings]);
+
+  /** Indices the load button will pull, given range + stride. Memoized so the live count
+   *  preview stays cheap as the user scrubs the inputs. */
+  const selectedFrameIndices = useMemo(() => {
+    if (!pickedRecordingId) return [];
+    const meta = recordings.find((r) => r.id === pickedRecordingId);
+    if (!meta) return [];
+    const start = Math.max(0, Math.min(meta.frameCount - 1, frameRangeStart));
+    const end = Math.max(start, Math.min(meta.frameCount - 1, frameRangeEnd));
+    const stride = Math.max(1, frameStride);
+    const out: number[] = [];
+    for (let i = start; i <= end; i += stride) out.push(i);
+    return out;
+  }, [pickedRecordingId, recordings, frameRangeStart, frameRangeEnd, frameStride]);
+
+  /** Pull a SUBSET of frames from a saved recording into the samples list. Honors the
+   *  start / end / stride filters so a 10-minute recording at 500ms intervals (1200 frames)
+   *  can be reduced to e.g. every 30th frame for a 40-sample training set. */
+  const loadFromRecording = useCallback(async (recordingId: string) => {
+    if (!profileId) return;
+    if (selectedFrameIndices.length === 0) return;
+    setLoadingFromRecording(true);
+    try {
+      const rows: SampleRow[] = [];
+      for (const i of selectedFrameIndices) {
+        const f = await recordingService.getFrame(profileId, recordingId, i);
+        if (!f?.imageBase64) continue;
+        rows.push({
+          id: `rec-${recordingId}-${i}-${Date.now()}`,
+          imageBase64: f.imageBase64,
+          width: f.width,
+          height: f.height,
+          label: '',
+          capturedAt: new Date(f.capturedAt).getTime(),
+        });
+      }
+      setSamples((prev) => [...prev, ...rows]);
+      message.success(t('detection.train.recordingLoaded', 'Loaded {{n}} frames.', { n: rows.length }));
+    } catch (e) { message.error(String(e)); }
+    finally { setLoadingFromRecording(false); }
+  }, [profileId, selectedFrameIndices, t]);
 
   // Re-train flow: pre-load saved samples for the chosen detection.
   useEffect(() => {
@@ -510,6 +586,22 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     if (step === 'roi') return !!draft.roi && draft.roi.w > 0 && draft.roi.h > 0;
     if (step === 'train') return !!trainingResult?.suggested;
     return true;
+  };
+
+  /** Human-readable explanation of WHY Next is currently disabled — surfaces in a Tooltip
+   *  so users don't stare at a grayed-out button wondering what's missing. */
+  const nextBlockedReason = (): string | undefined => {
+    if (step === 'setup' && !draft.name.trim()) return t('detection.train.nextBlock.name', 'Give the detection a name first.');
+    if (step === 'samples') {
+      if (samples.length < 2) return t('detection.train.nextBlock.minSamples', 'Capture at least 2 samples.');
+      const unlabeled = samples.filter((s) => !s.label.trim()).length;
+      if (unlabeled > 0) return t('detection.train.nextBlock.labels', '{{n}} sample(s) still need labels.', { n: unlabeled });
+    }
+    if (step === 'roi' && (!draft.roi || draft.roi.w <= 0 || draft.roi.h <= 0))
+      return t('detection.train.nextBlock.roi', 'Drag a rectangle on the preview, or pick a suggested region.');
+    if (step === 'train' && !trainingResult?.suggested)
+      return t('detection.train.nextBlock.train', 'Run training first to produce a suggested config.');
+    return undefined;
   };
 
   const next = () => {
@@ -559,7 +651,10 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
 
   const onSnapshot = async () => {
     const f = await grabFrame();
-    if (f) addSample(f.b64, f.w, f.h);
+    if (f) {
+      addSample(f.b64, f.w, f.h);
+      setFlashKey((k) => k + 1);  // brief visual confirmation flash
+    }
   };
 
   const startRecording = () => {
@@ -568,25 +663,33 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
       return;
     }
     setRecording(true);
-    recordEndRef.current = Date.now() + recordDurationS * 1000;
+    setRecordProgress(0);
+    recordStartRef.current = Date.now();
+    recordEndRef.current = recordStartRef.current + recordDurationS * 1000;
+
     const tick = async () => {
-      if (Date.now() >= recordEndRef.current) {
-        if (recordTimerRef.current) clearInterval(recordTimerRef.current);
-        recordTimerRef.current = null;
-        setRecording(false);
-        return;
-      }
+      if (Date.now() >= recordEndRef.current) { stopRecording(); return; }
       const f = await grabFrame();
       if (f) addSample(f.b64, f.w, f.h);
     };
     void tick();
     recordTimerRef.current = window.setInterval(() => { void tick(); }, recordIntervalMs);
+
+    // Independent UI ticker — drives the progress bar smoothly (every 100ms) without
+    // coupling to the capture cadence. Without this the bar only updates when a frame
+    // lands, which is too coarse at long intervals (1s+).
+    recordProgressTimerRef.current = window.setInterval(() => {
+      const total = recordDurationS * 1000;
+      const elapsed = Date.now() - recordStartRef.current;
+      setRecordProgress(Math.max(0, Math.min(1, elapsed / total)));
+    }, 100);
   };
 
   const stopRecording = () => {
-    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
-    recordTimerRef.current = null;
+    if (recordTimerRef.current) { clearInterval(recordTimerRef.current); recordTimerRef.current = null; }
+    if (recordProgressTimerRef.current) { clearInterval(recordProgressTimerRef.current); recordProgressTimerRef.current = null; }
     setRecording(false);
+    setRecordProgress(0);
   };
 
   const onUpload = async (file: File) => {
@@ -874,39 +977,94 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
               {t('detection.train.samples.hint', 'Need at least 2. Label each — for this kind: ')}<b>{labelHint}</b>
             </div>
             <CompactSpace wrap>
-              <CompactSelect
-                showSearch
-                placeholder={t('runner.pickWindow', 'Pick a window')}
+              <WindowSelector
                 value={windowHandle}
                 onChange={setWindowHandle}
-                options={windows.map((w) => ({ value: w.handle, label: `${w.title} — ${w.processName}` }))}
-                style={{ minWidth: 320 }}
+                minWidth={320}
               />
-              <Tooltip title={t('runner.refreshWindows', 'Refresh windows')}>
-                <CompactButton icon={<ReloadOutlined />} onClick={refreshWindows} />
-              </Tooltip>
               <CompactSegmented
                 value={captureMode}
-                onChange={(v) => setCaptureMode(v as 'snapshot' | 'record')}
+                onChange={(v) => setCaptureMode(v as 'snapshot' | 'record' | 'recording')}
                 options={[
                   { value: 'snapshot', label: t('detection.train.mode.snapshot', 'Snapshot') },
                   { value: 'record', label: t('detection.train.mode.record', 'Record') },
+                  { value: 'recording', label: t('detection.train.mode.recording', 'From recording') },
                 ]}
               />
               {captureMode === 'snapshot' ? (
                 <CompactPrimaryButton icon={<CameraOutlined />} onClick={() => void onSnapshot()}>
-                  {t('detection.train.snap', 'Capture frame')}
+                  {samples.length > 0
+                    ? t('detection.train.snapWithCount', 'Capture frame ({{n}})', { n: samples.length })
+                    : t('detection.train.snap', 'Capture frame')}
                 </CompactPrimaryButton>
-              ) : recording ? (
-                <CompactDangerButton icon={<StopOutlined />} onClick={stopRecording}>
-                  {t('detection.train.stop', 'Stop')}
-                </CompactDangerButton>
+              ) : captureMode === 'record' ? (
+                recording ? (
+                  <CompactDangerButton icon={<StopOutlined />} onClick={stopRecording}>
+                    {t('detection.train.stopRecording', 'Stop ({{pct}}%)', { pct: Math.round(recordProgress * 100) })}
+                  </CompactDangerButton>
+                ) : (
+                  <CompactPrimaryButton icon={<PlayCircleOutlined />} onClick={startRecording}>
+                    {t('detection.train.record', 'Record')}
+                  </CompactPrimaryButton>
+                )
               ) : (
-                <CompactPrimaryButton icon={<PlayCircleOutlined />} onClick={startRecording}>
-                  {t('detection.train.record', 'Record')}
-                </CompactPrimaryButton>
+                <>
+                  <CompactSelect
+                    placeholder={t('detection.train.pickRecording', 'Pick a recording') as string}
+                    value={pickedRecordingId}
+                    onChange={(v) => setPickedRecordingId(v as string)}
+                    options={recordings.map((r) => ({ value: r.id, label: `${r.name} (${r.frameCount} frames)` }))}
+                    style={{ minWidth: 240 }}
+                  />
+                </>
               )}
             </CompactSpace>
+
+            {captureMode === 'recording' && pickedRecordingId && (() => {
+              const meta = recordings.find((r) => r.id === pickedRecordingId);
+              const max = meta ? Math.max(0, meta.frameCount - 1) : 0;
+              return (
+                <div className="training-record-bar">
+                  <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                    {t('detection.train.frameRange', 'Frames')}:
+                  </span>
+                  <CompactInput
+                    size="small"
+                    value={frameRangeStart}
+                    onChange={(e) => setFrameRangeStart(Math.max(0, Math.min(max, parseInt(e.target.value, 10) || 0)))}
+                    style={{ width: 70 }}
+                  />
+                  <span style={{ fontSize: 12 }}>–</span>
+                  <CompactInput
+                    size="small"
+                    value={frameRangeEnd}
+                    onChange={(e) => setFrameRangeEnd(Math.max(0, Math.min(max, parseInt(e.target.value, 10) || 0)))}
+                    style={{ width: 70 }}
+                  />
+                  <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                    {t('detection.train.stride', 'every')}:
+                  </span>
+                  <CompactInput
+                    size="small"
+                    value={frameStride}
+                    onChange={(e) => setFrameStride(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    style={{ width: 70 }}
+                    addonAfter={t('detection.train.strideUnit', 'th') as string}
+                  />
+                  <span style={{ fontSize: 12, color: 'var(--color-text-secondary)', minWidth: 100 }}>
+                    {t('detection.train.willLoad', '→ {{n}} frames', { n: selectedFrameIndices.length })}
+                  </span>
+                  <CompactPrimaryButton
+                    size="small"
+                    loading={loadingFromRecording}
+                    disabled={selectedFrameIndices.length === 0}
+                    onClick={() => void loadFromRecording(pickedRecordingId)}
+                  >
+                    {t('detection.train.loadRecording', 'Load frames')}
+                  </CompactPrimaryButton>
+                </div>
+              );
+            })()}
 
             {captureMode === 'record' && (
               <div className="training-record-bar">
@@ -934,9 +1092,14 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
                   <div className="training-record-bar__progress">
                     <div
                       className="training-record-bar__progress-fill"
-                      style={{ width: `${Math.min(100, ((Date.now() - (recordEndRef.current - recordDurationS * 1000)) / (recordDurationS * 1000)) * 100)}%` }}
+                      style={{ width: `${(recordProgress * 100).toFixed(1)}%` }}
                     />
                   </div>
+                )}
+                {recording && (
+                  <span style={{ fontSize: 12, color: 'var(--color-text-secondary)', minWidth: 60 }}>
+                    {samples.length} {t('detection.train.captured', 'captured')}
+                  </span>
                 )}
               </div>
             )}
@@ -1084,9 +1247,9 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
 
         {step === 'save' && (
           <div className="training-step">
-            <div className="training-step__title">{t('detection.train.save.title', 'Output bindings & save')}</div>
+            <div className="training-step__title">{t('detection.train.save.title', 'Name your detection & save')}</div>
             <div className="training-step__hint">
-              {t('detection.train.save.hint', 'Wire the detection result into your scripts. Leave fields blank to skip.')}
+              {t('detection.train.save.hint', 'Scripts will read this detection by name via detect.run(\'…\'). Pick a memorable name and group to organize.')}
             </div>
             <div>
               <span style={{ fontSize: 12 }}>{t('detection.field.name', 'Name')}</span>
@@ -1101,20 +1264,10 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
               />
             </div>
             <div>
-              <span style={{ fontSize: 12 }}>{t('detection.output.ctxKey', 'ctx key')}</span>
-              <CompactInput
-                value={draft.output.ctxKey ?? ''}
-                placeholder="hp"
-                onChange={(e) => setDraft({ ...draft, output: { ...draft.output, ctxKey: e.target.value || undefined } })}
-              />
-            </div>
-            <div>
-              <span style={{ fontSize: 12 }}>{t('detection.output.event', 'brickbot event')}</span>
-              <CompactInput
-                value={draft.output.event ?? ''}
-                placeholder="hpChanged"
-                onChange={(e) => setDraft({ ...draft, output: { ...draft.output, event: e.target.value || undefined } })}
-              />
+              <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                {t('detection.train.scriptUsage', 'Use it in a script:')}
+              </span>
+              <pre className="detection-script-hint">{`const r = detect.run('${draft.name || 'detection-name'}');\n// r.value, r.found, r.match, r.triggered, r.blobs\nctx.set('${draft.name || 'value'}', r.value ?? r.found);`}</pre>
             </div>
           </div>
         )}
@@ -1129,9 +1282,13 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
               {t('detection.train.saveDetection', 'Save detection')}
             </CompactPrimaryButton>
           ) : (
-            <CompactPrimaryButton onClick={next} disabled={!canGoNext()}>
-              {t('detection.train.next', 'Next')}
-            </CompactPrimaryButton>
+            <Tooltip title={canGoNext() ? '' : nextBlockedReason()}>
+              <span>
+                <CompactPrimaryButton onClick={next} disabled={!canGoNext()}>
+                  {t('detection.train.next', 'Next')}
+                </CompactPrimaryButton>
+              </span>
+            </Tooltip>
           )}
         </CompactSpace>
       </div>

@@ -228,6 +228,11 @@ declare interface BbBrickbotApi {
   /** Declarative trigger: predicate runs each tick, action fires when truthy. */
   when(predicate: () => boolean, action: () => void, opts?: BbTriggerOptions): void;
 
+  /** Request graceful shutdown of the run. Reason surfaces in the runner's stoppedReason
+   *  state (e.g. for the UI: "stopped: goalReached"). First call wins.
+   *  @param reason free-form identifier; defaults to 'script'. */
+  stop(reason?: string): void;
+
   /** Main loop — tick until cancelled. Pumps a frame, drains UI invocations,
    *  optionally runs detections, evaluates triggers, fires 'tick'. Call from main();
    *  blocks until Stop. */

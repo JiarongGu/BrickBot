@@ -41,6 +41,13 @@ public sealed class WinRtCaptureService : ICaptureService, IDisposable
     private IDirect3DDevice? _device;
     private nint _d3dDevicePtr;
     private nint _d3dContextPtr;
+    /// <summary>Tick64 of the last successful Grab. Long gaps (no captures in N seconds) are
+    /// a signal that the framepool may have a stale buffered frame waiting; we drop it and
+    /// wait for a fresh one to avoid handing back N-seconds-old pixels.</summary>
+    private long _lastGrabTick;
+    /// <summary>Set by EnsureSession after a fresh session is created so the next Grab
+    /// discards the very first frame (which is captured at session-start time, not now).</summary>
+    private bool _dropNextFrame;
     /// <summary>Cached staging texture — reused across Grab() calls. Reallocated only when
     /// the captured window's resolution changes (rare). Saves ~3-5ms per frame vs allocating
     /// a fresh GPU texture every call.</summary>
@@ -104,6 +111,20 @@ public sealed class WinRtCaptureService : ICaptureService, IDisposable
 
     private CaptureFrame GrabInternal()
     {
+        // If the previous Grab was more than 500ms ago, the framepool may have buffered an
+        // old frame from before the gap. Drain + drop everything currently queued, then wait
+        // for a fresh post-now frame. This is the fix for the "Capture button shows a frame
+        // from a few seconds ago" bug — the user's Grab triggers, but a stale buffered frame
+        // was sitting in the pool from the last activity.
+        var now = Environment.TickCount64;
+        var staleGap = _lastGrabTick != 0 && (now - _lastGrabTick) > 500;
+        if (staleGap || _dropNextFrame)
+        {
+            Direct3D11CaptureFrame? stale;
+            while ((stale = _pool!.TryGetNextFrame()) is not null) stale.Dispose();
+            _dropNextFrame = false;
+        }
+
         // Drain ALL queued frames and keep only the latest. The framepool buffers at the
         // window's render rate (~60 Hz); if we just take TryGetNextFrame()[0] the caller
         // sees a stale image from N ticks ago. After draining, if nothing was queued, wait
@@ -130,6 +151,7 @@ public sealed class WinRtCaptureService : ICaptureService, IDisposable
             throw new OperationException("CAPTURE_FRAME_TIMEOUT", null,
                 $"WinRT capture timed out after {FrameWaitMs}ms waiting for a frame.");
         }
+        _lastGrabTick = Environment.TickCount64;
 
         try
         {
@@ -235,6 +257,10 @@ public sealed class WinRtCaptureService : ICaptureService, IDisposable
 
         _session.StartCapture();
         _activeHandle = windowHandle;
+        // First post-StartCapture frame can be the buffer's pre-recorded snapshot rather
+        // than fresh "now" pixels. GrabInternal drops it before draining for a real frame.
+        _dropNextFrame = true;
+        _lastGrabTick = 0;
     }
 
     private static void TrySetBool(GraphicsCaptureSession session, string name, bool value)
