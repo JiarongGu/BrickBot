@@ -1,13 +1,20 @@
 // Frontend mirror of BrickBot/Modules/Detection/Models/DetectionDefinition.cs.
 // NOTE: Enums are camelCase because IpcHandler serializes with JsonStringEnumConverter(CamelCase).
 
+/**
+ * Locked-in detection kinds (the legacy template/colorPresence/effect/featureMatch/region
+ * kinds were deleted in the v2 rewrite). Pick the kind that matches the visual you want
+ * to detect:
+ *   • `tracker` — moving sprite / character location (OpenCV KCF / CSRT / MIL).
+ *   • `pattern` — static element appearance via ORB descriptors. Background-invariant.
+ *   • `text`    — OCR text (Tesseract). Buff names, status banners, quest text.
+ *   • `bar`     — HP / MP / cooldown meter; reads fill ratio.
+ */
 export type DetectionKind =
-  | 'template'
-  | 'progressBar'
-  | 'colorPresence'
-  | 'effect'
-  | 'featureMatch'
-  | 'region';
+  | 'tracker'
+  | 'pattern'
+  | 'text'
+  | 'bar';
 
 /** RGB threshold = literal color match. HSV = hue-window match, robust against lighting drift. */
 export type ColorSpace = 'rgb' | 'hsv';
@@ -45,71 +52,75 @@ export interface RgbColor {
   b: number;
 }
 
-export interface TemplateOptions {
-  /** Legacy: id of a Templates-table row. Trainer-built definitions populate `embeddedPng`. */
-  templateName: string;
-  /** Base64 PNG embedded directly in the detection — the trainer writes this. */
-  embeddedPng?: string;
-  minConfidence: number;
-  scale: number;
-  grayscale: boolean;
-  pyramid: boolean;
-  /** Match in Canny edge space — robust to color drift / variable fill / lighting. Implies grayscale. */
-  edge: boolean;
+// ============================================================================
+//  Per-kind options
+// ============================================================================
+
+/** OpenCV visual tracker algorithm. KCF balanced (default), CSRT most accurate (slow),
+ *  MIL robust to short occlusions (moderate). */
+export type TrackerAlgorithm = 'kcf' | 'csrt' | 'mil';
+
+export interface TrackerOptions {
+  /** Base64 PNG of the frame the tracker was initialized on. */
+  initFramePng?: string;
+  /** Initial bbox in window-relative pixels — the user's drag-rectangle at training time. */
+  initX: number;
+  initY: number;
+  initW: number;
+  initH: number;
+  algorithm: TrackerAlgorithm;
+  /** When the tracker reports lost, automatically re-init from the saved frame on next call. */
+  reacquireOnLost: boolean;
 }
 
-export interface ProgressBarOptions {
-  /** Optional — leave blank to source the bar bbox from the ROI directly (anchor / fromDetection). */
-  templateName: string;
+export interface PatternOptions {
+  /** Reference patch (cropped to trained element). Used for re-training + overlay viz. */
   embeddedPng?: string;
+  /** Base64 ORB descriptor blob (rows × 32 bytes, row-major). */
+  descriptors?: string;
+  /** Number of trained keypoints (descriptor blob row count). */
+  keypointCount: number;
+  /** Reference patch dimensions — used to project matched keypoints into a bbox. */
+  templateWidth: number;
+  templateHeight: number;
+  /** Lowe ratio test threshold (0..1, lower = stricter). */
+  loweRatio: number;
+  /** Minimum match-ratio (0..1) to count as found. */
   minConfidence: number;
-  templateEdge: boolean;
-  scale: number;
-  grayscale: boolean;
-  pyramid: boolean;
+  /** Cap on ORB keypoints extracted per frame at runtime. */
+  maxRuntimeKeypoints: number;
+}
+
+export interface TextOptions {
+  /** Tesseract language tag (e.g. `eng`, `chi_sim`, `jpn`). */
+  language: string;
+  /** Page-segmentation mode: 7 = single line (default for game UI), 8 = single word, 6 = block. */
+  pageSegMode: number;
+  /** Optional regex — only count as found when the OCR result matches. */
+  matchRegex?: string;
+  /** Minimum Tesseract confidence (0..100). */
+  minConfidence: number;
+  /** Pre-binarize the ROI before OCR. */
+  binarize: boolean;
+  /** Upscale factor before OCR (Tesseract prefers larger glyphs). */
+  upscaleFactor: number;
+}
+
+export interface BarOptions {
+  /** Optional Pattern detection id whose match bbox locates the bar; empty = use ROI. */
+  anchorPatternId?: string;
   fillColor: RgbColor;
   tolerance: number;
   colorSpace: ColorSpace;
-  /** Direction the bar grows toward. */
   direction: FillDirection;
-  /** Per-line fill threshold (0..1) for the directional scan. */
   lineThreshold: number;
   insetLeftPct: number;
   insetRightPct: number;
 }
 
-export interface ColorPresenceOptions {
-  color: RgbColor;
-  tolerance: number;
-  minArea: number;
-  maxResults: number;
-  colorSpace: ColorSpace;
-}
-
-export interface EffectOptions {
-  threshold: number;
-  autoBaseline: boolean;
-  /** Trainer-pinned baseline image (base64 PNG). When set, runtime uses this instead of
-   *  capturing the first runtime frame as baseline. */
-  embeddedBaselinePng?: string;
-  /** Edge-diff vs baseline. Catches shape changes; ignores lighting / color shifts. */
-  edge: boolean;
-}
-
-export interface FeatureMatchOptions {
-  templateName: string;
-  embeddedPng?: string;
-  minConfidence: number;
-  scaleMin: number;
-  scaleMax: number;
-  scaleSteps: number;
-  grayscale: boolean;
-  edge: boolean;
-}
-
-export interface RegionOptions {
-  note?: string;
-}
+// ============================================================================
+//  Output bindings
+// ============================================================================
 
 export interface DetectionOverlay {
   enabled: boolean;
@@ -117,7 +128,7 @@ export interface DetectionOverlay {
   label?: string;
 }
 
-/** Output value shape — drives `result.typedValue` so scripts read a consistent shape regardless of kind. */
+/** Output value shape — drives `result.typedValue`. */
 export type DetectionOutputType = 'boolean' | 'number' | 'text' | 'bbox' | 'bboxes' | 'point';
 
 export interface DetectionStability {
@@ -132,7 +143,6 @@ export interface DetectionOutput {
   event?: string;
   eventOnChangeOnly: boolean;
   overlay?: DetectionOverlay;
-  /** Primary value shape exposed via `r.typedValue` to scripts. */
   type?: DetectionOutputType;
   stability?: DetectionStability;
 }
@@ -144,22 +154,19 @@ export interface DetectionDefinition {
   group?: string;
   enabled: boolean;
   roi?: DetectionRoi;
-  template?: TemplateOptions;
-  progressBar?: ProgressBarOptions;
-  colorPresence?: ColorPresenceOptions;
-  effect?: EffectOptions;
-  featureMatch?: FeatureMatchOptions;
-  region?: RegionOptions;
+  tracker?: TrackerOptions;
+  pattern?: PatternOptions;
+  text?: TextOptions;
+  bar?: BarOptions;
   output: DetectionOutput;
 }
 
+// ============================================================================
+//  Result + training
+// ============================================================================
+
 export interface ResultBox {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  cx: number;
-  cy: number;
+  x: number; y: number; w: number; h: number; cx: number; cy: number;
 }
 
 export interface DetectionResult {
@@ -168,23 +175,22 @@ export interface DetectionResult {
   kind: DetectionKind;
   found: boolean;
   durationMs: number;
+  /** Bar fill ratio (0..1). */
   value?: number;
-  triggered?: boolean;
+  /** Match bbox (tracker / pattern / bar). */
   match?: ResultBox;
-  strip?: ResultBox;
-  blobs?: ResultBox[];
+  /** Pattern keypoint-match ratio; tracker reports null. */
   confidence?: number;
-  /** Output-shape-aware value driven by `output.type`. Set by the JS detect.run wrapper. */
-  typedValue?: unknown;
+  /** Bar fill-strip used for the per-line scan. */
+  strip?: ResultBox;
+  /** OCR result text (Text kind only). */
+  text?: string;
 }
 
-/** One labeled image for training. The label's interpretation depends on `kind`:
- *  ProgressBar → expected fill ratio (0..1). */
 export interface TrainingSample {
   imageBase64: string;
   label: string;
   roi?: DetectionRoi;
-  note?: string;
 }
 
 export interface TrainingDiagnostic {
@@ -199,16 +205,12 @@ export interface TrainingResult {
   summary: string;
 }
 
-/** Mirror of BrickBot.Modules.Detection.Models.TrainingSampleInfo. */
 export interface TrainingSampleInfo {
   id: string;
-  detectionId: string;
-  label?: string;
-  note?: string;
+  label: string;
+  capturedAt: string;
   width: number;
   height: number;
-  capturedAt: string;
-  /** Only populated when LIST_SAMPLES requests includeImages = true. */
   imageBase64?: string;
 }
 
@@ -220,13 +222,15 @@ export interface NewTrainingSamplePayload {
   note?: string;
 }
 
+// ============================================================================
+//  Defaults + UI labels
+// ============================================================================
+
 export const DETECTION_KIND_LABEL: Record<DetectionKind, string> = {
-  template: 'Element',
-  progressBar: 'Progress Bar',
-  colorPresence: 'Color Presence',
-  effect: 'Visual Effect',
-  featureMatch: 'Sprite / Character',
-  region: 'Region (anchor)',
+  tracker: 'Tracker (moving element)',
+  pattern: 'Pattern (visual feature)',
+  text: 'Text (OCR)',
+  bar: 'Bar (HP / MP / cooldown)',
 };
 
 /** Default factory — produces a fresh definition with sensible per-kind defaults. */
@@ -239,36 +243,41 @@ export function newDetection(kind: DetectionKind): DetectionDefinition {
     output: { eventOnChangeOnly: true },
   };
   switch (kind) {
-    case 'template':
-      base.template = { templateName: '', minConfidence: 0.85, scale: 1.0, grayscale: true, pyramid: false, edge: false };
+    case 'tracker':
+      base.tracker = {
+        initX: 0, initY: 0, initW: 0, initH: 0,
+        algorithm: 'kcf',
+        reacquireOnLost: true,
+      };
       break;
-    case 'progressBar':
-      base.progressBar = {
-        templateName: '', minConfidence: 0.80, templateEdge: true,
-        scale: 1.0, grayscale: true, pyramid: false,
+    case 'pattern':
+      base.pattern = {
+        keypointCount: 0,
+        templateWidth: 0, templateHeight: 0,
+        loweRatio: 0.75,
+        minConfidence: 0.20,
+        maxRuntimeKeypoints: 500,
+      };
+      break;
+    case 'text':
+      base.text = {
+        language: 'eng',
+        pageSegMode: 7,
+        minConfidence: 60,
+        binarize: true,
+        upscaleFactor: 2.0,
+      };
+      break;
+    case 'bar':
+      base.bar = {
         fillColor: { r: 220, g: 30, b: 30 },
-        tolerance: 60, colorSpace: 'rgb',
-        direction: 'leftToRight', lineThreshold: 0.4,
-        insetLeftPct: 0.30, insetRightPct: 0.18,
+        tolerance: 60,
+        colorSpace: 'rgb',
+        direction: 'leftToRight',
+        lineThreshold: 0.4,
+        insetLeftPct: 0.30,
+        insetRightPct: 0.18,
       };
-      break;
-    case 'colorPresence':
-      base.colorPresence = {
-        color: { r: 220, g: 30, b: 30 }, tolerance: 30, minArea: 100, maxResults: 8, colorSpace: 'rgb',
-      };
-      break;
-    case 'effect':
-      base.effect = { threshold: 0.15, autoBaseline: true, edge: false };
-      break;
-    case 'featureMatch':
-      base.featureMatch = {
-        templateName: '', minConfidence: 0.80,
-        scaleMin: 0.9, scaleMax: 1.1, scaleSteps: 3,
-        grayscale: true, edge: false,
-      };
-      break;
-    case 'region':
-      base.region = {};
       break;
   }
   return base;

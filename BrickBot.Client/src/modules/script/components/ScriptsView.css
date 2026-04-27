@@ -80,7 +80,3 @@
   flex-direction: column;
 }
 
-/* CapturePanel manages its own padding — strip the SlideInScreen body default. */
-.scripts-view-capture-body {
-  padding: 0 !important;
-}

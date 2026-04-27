@@ -1,4 +1,5 @@
 using BrickBot.Modules.Capture.Models;
+using BrickBot.Modules.Detection.Models;
 using BrickBot.Modules.Vision.Models;
 using OpenCvSharp;
 
@@ -58,8 +59,31 @@ public interface IVisionService
 
     /// <summary>
     /// Find blobs of a color range. Returns up to <c>options.MaxResults</c> bounding boxes
-    /// sorted by area descending. Order of magnitude faster than template matching for
-    /// distinctly-colored elements (HP bar fills, skill cooldown overlays, debuff icons).
+    /// sorted by area descending. Exposed via <c>vision.findColors</c> for scripts.
     /// </summary>
     IReadOnlyList<ColorBlob> FindColors(CaptureFrame frame, ColorRange range, FindColorsOptions options);
+
+    /// <summary>
+    /// Extract ORB keypoints + binary descriptors from <paramref name="image"/>. The trainer
+    /// uses this on each positive sample to assemble the stored descriptor blob; the runtime
+    /// uses it on each frame's ROI to find candidates against the stored blob. Returns the
+    /// keypoints (positions + scales + angles) and the N×32 CV_8U descriptor matrix.
+    /// </summary>
+    (KeyPoint[] Keypoints, Mat Descriptors) ExtractDescriptors(Mat image, int maxKeypoints);
+
+    /// <summary>
+    /// Match a trained ORB descriptor blob against the current frame's ROI. Uses BFMatcher
+    /// (Hamming) + Lowe ratio test + RANSAC homography. Returns the projected bbox + a
+    /// confidence equal to the ratio of inlier matches to total trained keypoints — or null
+    /// if the inlier count falls below <see cref="PatternMatchOptions.MinConfidence"/>.
+    /// </summary>
+    PatternMatch? MatchPattern(CaptureFrame frame, Mat trainDescriptors, PatternMatchOptions options);
+
+    /// <summary>
+    /// OCR the given ROI via Tesseract. Returns the recognized text and per-result confidence
+    /// (0..100). Honors <see cref="TextOptions.Language"/>, page-segmentation mode, optional
+    /// pre-binarization and upscaling. NOT IMPLEMENTED in phase B — returns ("", 0) until
+    /// the Tesseract NuGet package is wired in phase C.
+    /// </summary>
+    (string Text, int Confidence) OcrRoi(CaptureFrame frame, RegionOfInterest roi, TextOptions options);
 }

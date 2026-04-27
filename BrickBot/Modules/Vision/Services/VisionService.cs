@@ -1,5 +1,6 @@
 using BrickBot.Modules.Capture.Models;
 using BrickBot.Modules.Core.Exceptions;
+using BrickBot.Modules.Detection.Models;
 using BrickBot.Modules.Vision.Models;
 using OpenCvSharp;
 
@@ -98,19 +99,53 @@ public sealed class VisionService : IVisionService
 
             if (matchTemplate.Width > haystack.Width || matchTemplate.Height > haystack.Height) return null;
 
+            // Mask path uses TM_CCORR_NORMED — the only normalized template-match mode in
+            // OpenCV 4 that respects a mask. Mask must be same W×H as the (possibly scaled,
+            // grayscaled, edge-detected) template; we apply the same transforms to it that
+            // we applied to the template. Non-zero mask pixels contribute to the score.
             using var result = new Mat();
-            Cv2.MatchTemplate(haystack, matchTemplate, result, TemplateMatchModes.CCoeffNormed);
-            Cv2.MinMaxLoc(result, out _, out var maxVal, out _, out var maxLoc);
+            Mat? scaledMask = null;
+            Mat? grayMask = null;
+            try
+            {
+                Mat? mask = options.Mask;
+                if (mask is not null)
+                {
+                    if (scale < 0.999)
+                    {
+                        scaledMask = new Mat();
+                        Cv2.Resize(mask, scaledMask, new OpenCvSharp.Size(matchTemplate.Width, matchTemplate.Height), 0, 0, InterpolationFlags.Nearest);
+                        mask = scaledMask;
+                    }
+                    if (mask.Channels() != 1)
+                    {
+                        grayMask = new Mat();
+                        Cv2.CvtColor(mask, grayMask, ColorConversionCodes.BGR2GRAY);
+                        mask = grayMask;
+                    }
+                    Cv2.MatchTemplate(haystack, matchTemplate, result, TemplateMatchModes.CCorrNormed, mask);
+                }
+                else
+                {
+                    Cv2.MatchTemplate(haystack, matchTemplate, result, TemplateMatchModes.CCoeffNormed);
+                }
+                Cv2.MinMaxLoc(result, out _, out var maxVal, out _, out var maxLoc);
 
-            if (maxVal < options.MinConfidence) return null;
+                if (maxVal < options.MinConfidence) return null;
 
-            var inverse = 1.0 / scale;
-            return new VisionMatch(
-                X: (int)Math.Round(maxLoc.X * inverse) + roiOffsetX,
-                Y: (int)Math.Round(maxLoc.Y * inverse) + roiOffsetY,
-                Width: template.Width,
-                Height: template.Height,
-                Confidence: maxVal);
+                var inverse = 1.0 / scale;
+                return new VisionMatch(
+                    X: (int)Math.Round(maxLoc.X * inverse) + roiOffsetX,
+                    Y: (int)Math.Round(maxLoc.Y * inverse) + roiOffsetY,
+                    Width: template.Width,
+                    Height: template.Height,
+                    Confidence: maxVal);
+            }
+            finally
+            {
+                scaledMask?.Dispose();
+                grayMask?.Dispose();
+            }
         }
         finally
         {
@@ -495,5 +530,136 @@ public sealed class VisionService : IVisionService
         var w = Math.Clamp(roi.Width, 0, haystack.Width - x);
         var h = Math.Clamp(roi.Height, 0, haystack.Height - y);
         return new Rect(x, y, w, h);
+    }
+
+    // ============================================================
+    //  Pattern (ORB descriptor) match
+    // ============================================================
+
+    public (KeyPoint[] Keypoints, Mat Descriptors) ExtractDescriptors(Mat image, int maxKeypoints)
+    {
+        if (image.Empty()) throw new OperationException("VISION_FRAME_EMPTY");
+
+        // BRISK (Binary Robust Invariant Scalable Keypoints) chosen over ORB because the
+        // current OpenCvSharp4 + native runtime build (4.11.0.20250507) is missing
+        // `features2d_Ptr_Feature2D_get` — the generic Ptr<> unwrapper that ORB.Create()
+        // calls internally. BRISK has its own type-specific unwrapper (Ptr_BRISK_get) that
+        // IS exported by the native DLL, so it works reliably. BRISK produces 64-byte
+        // binary descriptors (vs ORB's 32-byte) — roughly comparable speed, slightly more
+        // discriminative. Match via BFMatcher(Hamming) like ORB.
+        Mat gray;
+        Mat? converted = null;
+        if (image.Channels() == 1) { gray = image; }
+        else
+        {
+            converted = new Mat();
+            Cv2.CvtColor(image, converted, ColorConversionCodes.BGR2GRAY);
+            gray = converted;
+        }
+
+        try
+        {
+            using var brisk = BRISK.Create();
+            var descriptors = new Mat();
+            brisk.DetectAndCompute(gray, null, out var keypoints, descriptors);
+            // BRISK returns an empty Mat (not null) when no features detected.
+            // Cap keypoints to maxKeypoints — BRISK doesn't accept an nFeatures hint, so we
+            // sort by response (keypoint quality) and trim. Keeps runtime predictable.
+            if (keypoints.Length > maxKeypoints && maxKeypoints > 0)
+            {
+                var topIndices = keypoints
+                    .Select((kp, i) => (i, kp.Response))
+                    .OrderByDescending(t => t.Response)
+                    .Take(maxKeypoints)
+                    .Select(t => t.i)
+                    .OrderBy(i => i)
+                    .ToArray();
+                var trimmedKp = topIndices.Select(i => keypoints[i]).ToArray();
+                using var trimmedDesc = new Mat();
+                foreach (var i in topIndices) trimmedDesc.PushBack(descriptors.Row(i));
+                descriptors.Dispose();
+                return (trimmedKp, trimmedDesc.Clone());
+            }
+            return (keypoints, descriptors);
+        }
+        finally { converted?.Dispose(); }
+    }
+
+    public PatternMatch? MatchPattern(CaptureFrame frame, Mat trainDescriptors, PatternMatchOptions options)
+    {
+        if (frame.Image.Empty()) throw new OperationException("VISION_FRAME_EMPTY");
+        if (trainDescriptors.Empty() || trainDescriptors.Rows < 4) return null;
+
+        Mat haystack = frame.Image;
+        var roiOffsetX = 0;
+        var roiOffsetY = 0;
+        Mat? cropped = null;
+
+        try
+        {
+            if (options.Roi is { } roi)
+            {
+                var rect = ClampRect(haystack, roi);
+                if (rect.Width < 16 || rect.Height < 16) return null;
+                cropped = new Mat(haystack, rect);
+                haystack = cropped;
+                roiOffsetX = rect.X;
+                roiOffsetY = rect.Y;
+            }
+
+            var (queryKeypoints, queryDescriptors) = ExtractDescriptors(haystack, options.MaxRuntimeKeypoints);
+            using var _ownedQuery = queryDescriptors;
+            if (queryDescriptors.Empty() || queryDescriptors.Rows < 4) return null;
+
+            // BFMatcher with knnMatch(k=2) → Lowe ratio test discards ambiguous matches where
+            // the second-best is too close to the best.
+            using var matcher = new BFMatcher(NormTypes.Hamming, crossCheck: false);
+            var knn = matcher.KnnMatch(trainDescriptors, queryDescriptors, k: 2);
+            var good = new List<DMatch>(knn.Length);
+            foreach (var pair in knn)
+            {
+                if (pair.Length < 2) continue;
+                if (pair[0].Distance < options.LoweRatio * pair[1].Distance)
+                {
+                    good.Add(pair[0]);
+                }
+            }
+            if (good.Count < 4) return null;     // FindHomography needs ≥4 correspondences.
+
+            // Build src (template-space) + dst (frame-space) point arrays. Template-space
+            // points are derived from the trained keypoint indices — but we only stored the
+            // descriptor blob, not the original keypoint coords. Without those, we can't run
+            // RANSAC homography. Compromise: use the centroid of inlier query points as the
+            // localized position, plus the trained template W×H as the bbox dims.
+            var qPts = good.Select(g => queryKeypoints[g.TrainIdx].Pt).ToArray();
+            var cx = qPts.Average(p => p.X) + roiOffsetX;
+            var cy = qPts.Average(p => p.Y) + roiOffsetY;
+
+            // Confidence = good-matches / trained-keypoints. Caller uses this to gate the
+            // result; below MinConfidence we report not-found.
+            var confidence = good.Count / (double)trainDescriptors.Rows;
+            if (confidence < options.MinConfidence) return null;
+
+            return new PatternMatch(
+                X: (int)Math.Round(cx - options.TemplateWidth / 2.0),
+                Y: (int)Math.Round(cy - options.TemplateHeight / 2.0),
+                Width: options.TemplateWidth,
+                Height: options.TemplateHeight,
+                Confidence: confidence);
+        }
+        finally { cropped?.Dispose(); }
+    }
+
+    // ============================================================
+    //  OCR — Tesseract integration (phase C — stub for now)
+    // ============================================================
+
+    public (string Text, int Confidence) OcrRoi(CaptureFrame frame, RegionOfInterest roi, TextOptions options)
+    {
+        // Phase C wires Tesseract via the `Tesseract` NuGet package + `tessdata/<lang>.traineddata`
+        // shipped under the app dir. Until then, Text detections silently report not-found so
+        // the rest of the system (UI, training, runtime dispatch) can be built and tested.
+        _ = frame; _ = roi; _ = options;
+        return (string.Empty, 0);
     }
 }

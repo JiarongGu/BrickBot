@@ -59,22 +59,29 @@ export async function deleteScript(profileId: string, kind: ScriptKind, name: st
 
 export const STARTER_TEMPLATES: Record<ScriptKind, string> = {
   main: `// Top-level orchestrator — the Runner picks one main script to execute.
-// Library scripts pulled in via require() (or import) provide helpers + perception.
+//
+// Train detections in the Detections tab, then read them in this script via
+// detect.run('name'). Click the "Detection" button in the toolbar above to
+// insert a reference at the cursor. Add library scripts later with require()
+// when this main needs shared helpers.
 
-import { combat, log } from 'brickbot';
-const updatePerception = require<() => void>('perception');
+import { brickbot, ctx, detect, log } from 'brickbot';
 
-const tree = combat.Sequence(
-  // Re-run perception each tick so action decisions read fresh state from ctx.
-  combat.Action(() => updatePerception()),
+// Sample detections every tick and stash the values in ctx for triggers below.
+brickbot.on('tick', () => {
+  // Example — uncomment after training a "hp-bar" detection:
+  // ctx.set('hp', detect.run('hp-bar').value);
+});
 
-  combat.Selector(
-    // Add your action priorities here:
-    combat.Action(() => log('idle...')),
-  ),
+// React when ctx state crosses a threshold. Cooldowns avoid spamming the action.
+brickbot.when(
+  () => (ctx.get<number>('hp') ?? 1) < 0.3,
+  () => log('low hp — heal here'),
+  { cooldownMs: 1000 },
 );
 
-combat.runTree(tree, { intervalMs: 80 });
+// Pumps frames + drains UI invocations + evaluates when() triggers each tick.
+brickbot.runForever({ tickMs: 50, autoDetect: true });
 `,
   library: `// Library script — pulled in lazily when a main (or another library) requires it.
 //

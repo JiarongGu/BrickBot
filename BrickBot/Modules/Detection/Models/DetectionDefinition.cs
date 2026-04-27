@@ -6,6 +6,13 @@ namespace BrickBot.Modules.Detection.Models;
 /// (via <c>detect.run(name)</c> / <c>detect.runAll()</c>) and the UI's Detections panel
 /// edits them. Each definition declares its kind, ROI, type-specific options, and the
 /// output bindings (ctx key + event name + overlay) that downstream systems consume.
+///
+/// Locked-in kinds (everything else has been deleted):
+///   • <see cref="DetectionKind.Tracker"/> — track a moving element / character location.
+///   • <see cref="DetectionKind.Pattern"/> — detect appearance via ORB descriptor matching
+///     (background- / color-invariant; replaces the old template path).
+///   • <see cref="DetectionKind.Text"/>    — OCR (Tesseract) for buff names / status text.
+///   • <see cref="DetectionKind.Bar"/>     — HP / MP / cooldown meters; reads fill ratio.
 /// </summary>
 public sealed class DetectionDefinition
 {
@@ -15,8 +22,8 @@ public sealed class DetectionDefinition
     /// <summary>Display name. Free-form; what the user types in the editor.</summary>
     public string Name { get; set; } = "";
 
-    /// <summary>Detection kind discriminator. Drives which of the *Config sub-objects is read.</summary>
-    public DetectionKind Kind { get; set; } = DetectionKind.Template;
+    /// <summary>Detection kind discriminator. Drives which of the *Options sub-objects is read.</summary>
+    public DetectionKind Kind { get; set; } = DetectionKind.Pattern;
 
     /// <summary>Free-form tag the user can use to group detections in the UI.</summary>
     public string? Group { get; set; }
@@ -24,19 +31,13 @@ public sealed class DetectionDefinition
     /// <summary>Whether <c>detect.runAll()</c> includes this detection.</summary>
     public bool Enabled { get; set; } = true;
 
-    /// <summary>Window-relative search region. null = whole frame. Required for progressBar/effect/text.</summary>
+    /// <summary>Window-relative search region. null = whole frame. Required for bar/text/effect.</summary>
     public DetectionRoi? Roi { get; set; }
 
-    public TemplateOptions? Template { get; set; }
-    public ProgressBarOptions? ProgressBar { get; set; }
-    public ColorPresenceOptions? ColorPresence { get; set; }
-    public EffectOptions? Effect { get; set; }
-    public FeatureMatchOptions? FeatureMatch { get; set; }
-
-    /// <summary>Region kind has no kind-specific config — its ROI (with anchor support) IS the
-    /// definition. Useful for declaring named, anchored screen regions that other detections
-    /// reference via <see cref="DetectionRoi.FromDetectionId"/>.</summary>
-    public RegionOptions? Region { get; set; }
+    public TrackerOptions? Tracker { get; set; }
+    public PatternOptions? Pattern { get; set; }
+    public TextOptions? Text { get; set; }
+    public BarOptions? Bar { get; set; }
 
     /// <summary>How the detection result reaches the rest of the system (ctx / event / overlay).</summary>
     public DetectionOutput Output { get; set; } = new();
@@ -44,30 +45,33 @@ public sealed class DetectionDefinition
 
 /// <summary>
 /// Kind discriminator. Serialized as camelCase string by JsonStringEnumConverter(CamelCase)
-/// so the frontend type union is <c>'template' | 'progressBar' | 'colorPresence' | 'effect' | 'featureMatch'</c>.
+/// so the frontend type union is <c>'tracker' | 'pattern' | 'text' | 'bar'</c>.
 /// </summary>
 public enum DetectionKind
 {
-    /// <summary>Template match. Output: bbox + confidence (or not-found).</summary>
-    Template,
+    /// <summary>Visual tracker (OpenCV KCF / CSRT / MIL). Initialized once with a chosen frame
+    /// + bbox; subsequent runs call <c>tracker.Update(frame)</c> to follow the element as it
+    /// moves. Output: bbox + cx/cy. Use for moving sprites / characters where position matters.</summary>
+    Tracker,
 
-    /// <summary>Two-stage progress bar: template locates the bar, brightest fill row is auto-discovered,
-    /// percent-bar samples a strip across it. Output: 0..1 fill ratio.</summary>
-    ProgressBar,
+    /// <summary>ORB-descriptor pattern match. Trainer extracts ORB keypoints + descriptors from
+    /// positive samples; runtime extracts descriptors from the current ROI and matches via
+    /// <c>BFMatcher</c> (Hamming + Lowe ratio test) with optional RANSAC homography to localize.
+    /// Background- and color-invariant — survives shader/filter changes that kill plain template
+    /// matching. Output: bbox + confidence (matched-keypoint ratio) or not-found.</summary>
+    Pattern,
 
-    /// <summary>Color blobs inside an ROI. Output: count + bboxes.</summary>
-    ColorPresence,
+    /// <summary>OCR text recognition via Tesseract. ROI is binarized + scaled, fed to
+    /// <c>TesseractEngine.Process</c>; result is the extracted text plus confidence. Optional
+    /// regex filter narrows results to specific patterns. Use for buff names, status banners,
+    /// quest text — anything readable that's not amenable to fixed-pattern match.</summary>
+    Text,
 
-    /// <summary>ROI vs baseline diff. Output: bool (true when diff > threshold) — use for visual-effect detection.</summary>
-    Effect,
-
-    /// <summary>Scale-invariant template match. Output: bbox + confidence (or not-found).</summary>
-    FeatureMatch,
-
-    /// <summary>Anchored screen region — no detection logic, just outputs the resolved ROI.
-    /// Use for declaring "the top-right HUD area" once and referencing it from many detections
-    /// via <see cref="DetectionRoi.FromDetectionId"/>.</summary>
-    Region,
+    /// <summary>Bar / meter (HP, MP, stamina, cooldown). Two paths to locate the bar bbox:
+    /// (a) ROI given directly, (b) Pattern template anchors the bar. Then the runner samples a
+    /// strip across the bar in the configured fill direction and computes fill ratio via
+    /// <c>LinearFillRatio</c>. Output: 0..1 fill ratio.</summary>
+    Bar,
 }
 
 /// <summary>
@@ -80,7 +84,6 @@ public enum AnchorOrigin
     MidLeft, Center, MidRight,
     BottomLeft, BottomCenter, BottomRight,
 }
-
 
 /// <summary>
 /// Region of interest. Three resolution modes (priority order at runtime):
@@ -103,143 +106,154 @@ public sealed class DetectionRoi
     public AnchorOrigin? Anchor { get; set; }
 
     /// <summary>When set, this ROI is resolved from the referenced detection's match bbox at
-    /// run time. X/Y/W/H are interpreted as inset margins inside the referenced match. Combine
-    /// with cross-detection composition: detection A finds the HP bar bbox, detection B uses
-    /// A's bbox (with insets) as its ROI to compute fill %.</summary>
+    /// run time. X/Y/W/H are interpreted as inset margins inside the referenced match.</summary>
     public string? FromDetectionId { get; set; }
 }
 
-public sealed class TemplateOptions
+// ============================================================================
+//  Per-kind option blocks
+// ============================================================================
+
+/// <summary>
+/// Tracker algorithm — wraps OpenCV's <c>cv::Tracker</c> implementations. Picked at training
+/// time per detection. Trade-off ≈ FPS vs robustness:
+///   • <see cref="Kcf"/>  — fast (~150 fps single tracker), good for stable sprites.
+///   • <see cref="Csrt"/> — slow (~25 fps), most accurate, robust to scale + rotation drift.
+///   • <see cref="Mil"/>  — moderate, robust to brief occlusions, slower than KCF.
+/// Serialized as camelCase string (kcf / csrt / mil).
+/// </summary>
+public enum TrackerAlgorithm
 {
-    /// <summary>Legacy: id of a Templates-table row. Trainer-built definitions populate
-    /// <see cref="EmbeddedPng"/> instead; runtime checks Embedded first, then falls back here.</summary>
-    public string TemplateName { get; set; } = "";
-
-    /// <summary>Base64-encoded PNG embedded directly in the detection. Self-contained — no
-    /// external Templates-table dependency. Trainer auto-populates from positive samples.</summary>
-    public string? EmbeddedPng { get; set; }
-
-    public double MinConfidence { get; set; } = 0.85;
-    public double Scale { get; set; } = 1.0;
-    public bool Grayscale { get; set; } = true;
-    public bool Pyramid { get; set; }
-
-    /// <summary>Match in edge-detected (Canny) space instead of pixel space. Robust against
-    /// color drift, lighting changes, and variable fill (e.g. HP bar saved at 80% but runtime
-    /// at 30% — only outline survives). Implies grayscale.</summary>
-    public bool Edge { get; set; }
+    Kcf,
+    Csrt,
+    Mil,
 }
 
-public sealed class ProgressBarOptions
+public sealed class TrackerOptions
 {
-    /// <summary>Legacy template id (Templates-table row). Optional — trainer-built definitions
-    /// embed the bar bbox via <see cref="EmbeddedPng"/> or rely on the detection's ROI directly.</summary>
-    public string TemplateName { get; set; } = "";
+    /// <summary>Base64-encoded PNG of the frame the tracker was initialized on. Required —
+    /// the runtime decodes this once on first run to seed <c>tracker.Init(frame, bbox)</c>.</summary>
+    public string? InitFramePng { get; set; }
 
-    /// <summary>Base64-encoded PNG of the bar bbox template. Auto-populated by the trainer.</summary>
+    /// <summary>Initial bbox in window-relative pixel coords (the user's drag-rectangle at
+    /// training time).</summary>
+    public int InitX { get; set; }
+    public int InitY { get; set; }
+    public int InitW { get; set; }
+    public int InitH { get; set; }
+
+    /// <summary>Tracker algorithm. Default <see cref="TrackerAlgorithm.Kcf"/>.</summary>
+    public TrackerAlgorithm Algorithm { get; set; } = TrackerAlgorithm.Kcf;
+
+    /// <summary>When the tracker reports lost (Update returns false), automatically re-init
+    /// from the saved init frame on the next call. Default true.</summary>
+    public bool ReacquireOnLost { get; set; } = true;
+}
+
+public sealed class PatternOptions
+{
+    /// <summary>Base64-encoded reference patch (cropped to the trained element's tight bbox).
+    /// Used for re-training (descriptor re-extraction) and overlay visualization. NOT used
+    /// directly for runtime correlation — that's done by the descriptor blob.</summary>
     public string? EmbeddedPng { get; set; }
 
-    public double MinConfidence { get; set; } = 0.80;
+    /// <summary>Base64-encoded ORB descriptor matrix (CV_8U N×32 rows × 32 cols, serialized
+    /// row-major). Trainer extracts ORB keypoints from positive samples, keeps the
+    /// most-stable cluster, stores their descriptors here. Runtime matches against this blob.</summary>
+    public string? Descriptors { get; set; }
 
-    /// <summary>Match the bar's bbox in edge space — survives the case where the saved
-    /// template captured the bar at a different fill level than the live frame.</summary>
-    public bool TemplateEdge { get; set; } = true;
+    /// <summary>Number of keypoints encoded in <see cref="Descriptors"/> (rows). Used to
+    /// validate the blob on load and to compute confidence as <c>matched / Keypoints</c>.</summary>
+    public int KeypointCount { get; set; }
 
-    /// <summary>Uniform downsample for the bbox match (1.0 = full res; lower = faster, less accurate).</summary>
-    public double Scale { get; set; } = 1.0;
+    /// <summary>Reference template width × height in pixels. Used to project the matched
+    /// keypoints back into a bbox via RANSAC homography.</summary>
+    public int TemplateWidth { get; set; }
+    public int TemplateHeight { get; set; }
 
-    /// <summary>Convert the bbox match to grayscale before comparing — ~3× faster than color match.
-    /// Already implied by edge mode.</summary>
-    public bool Grayscale { get; set; } = true;
+    /// <summary>Lowe ratio test threshold for descriptor matching. Lower = stricter (fewer
+    /// false positives), higher = more lenient (more matches). 0.75 is the OpenCV default.</summary>
+    public double LoweRatio { get; set; } = 0.75;
 
-    /// <summary>Coarse-to-fine pyramid bbox match — ~5× faster than flat full-res with same accuracy.</summary>
-    public bool Pyramid { get; set; }
+    /// <summary>Minimum fraction of trained keypoints that must match to count as found.
+    /// 0.20 = at least 20 % of stored keypoints have a matching descriptor in the current
+    /// ROI (post Lowe ratio + RANSAC inlier filter).</summary>
+    public double MinConfidence { get; set; } = 0.20;
 
-    /// <summary>BGR fill color (despite the field names — matches the rest of the codebase's RGB-flavored API).</summary>
-    public RgbColor FillColor { get; set; } = new(220, 220, 220);
+    /// <summary>Maximum ORB keypoints extracted per frame at runtime. Higher = better recall
+    /// for cluttered frames, slower. 500 is a reasonable cap for 1080p game scenes.</summary>
+    public int MaxRuntimeKeypoints { get; set; } = 500;
+}
 
+public sealed class TextOptions
+{
+    /// <summary>Tesseract language tag (e.g. <c>eng</c>, <c>chi_sim</c>, <c>jpn</c>). Maps to
+    /// the corresponding <c>{lang}.traineddata</c> file under <c>tessdata/</c>. Default
+    /// <c>eng</c> ships with the app; other languages must be downloaded separately.</summary>
+    public string Language { get; set; } = "eng";
+
+    /// <summary>Page-segmentation mode hint to Tesseract. 7 = "single line", which is what
+    /// most game-UI text is. 8 = "single word"; 6 = "uniform block" for paragraphs.</summary>
+    public int PageSegMode { get; set; } = 7;
+
+    /// <summary>Optional regex filter — only count the OCR result as "found" when the
+    /// extracted text matches this regex. Lets you target specific labels (e.g. <c>^HP:</c>)
+    /// without script-side post-processing. Empty = accept any non-empty result.</summary>
+    public string? MatchRegex { get; set; }
+
+    /// <summary>Minimum Tesseract confidence (0..100) to accept the result. Below this the
+    /// detection reports not-found regardless of the regex.</summary>
+    public int MinConfidence { get; set; } = 60;
+
+    /// <summary>Pre-binarize the ROI before OCR. Most game text has solid stroke colors on
+    /// a busy background — binarization (Otsu / adaptive) dramatically improves OCR accuracy.
+    /// Default true; turn off for already-clean text on flat backgrounds.</summary>
+    public bool Binarize { get; set; } = true;
+
+    /// <summary>Upscale factor applied to the ROI before OCR. Tesseract is most accurate at
+    /// 30–60 pt glyphs; small game UI text often needs 2–3× upscale. Default 2.0.</summary>
+    public double UpscaleFactor { get; set; } = 2.0;
+}
+
+public sealed class BarOptions
+{
+    /// <summary>Optional Pattern detection id whose match bbox locates the bar. Leave empty
+    /// to use the bar's <see cref="DetectionDefinition.Roi"/> directly (which itself supports
+    /// anchored / from-detection composition). Pattern path is the way to go for HP bars
+    /// that move with the player frame; ROI path for fixed HUDs.</summary>
+    public string? AnchorPatternId { get; set; }
+
+    /// <summary>BGR fill color. The runner counts pixels matching this color (within
+    /// <see cref="Tolerance"/>) inside a strip across the bar to compute fill ratio.</summary>
+    public RgbColor FillColor { get; set; } = new(220, 30, 30);
+
+    /// <summary>±tolerance per channel for fill-color match. 60 ≈ catches dimmed / boosted
+    /// versions of the same color. Raise for HDR / bloomy games; lower for pixel-art games.</summary>
     public int Tolerance { get; set; } = 60;
 
-    /// <summary>Color space used to count fill pixels. HSV is the right choice when the game
-    /// applies bloom / gamma / color filters that drift the saved RGB but keep the hue intact.</summary>
+    /// <summary>HSV mode replaces the per-channel RGB tolerance with a hue-window match.
+    /// Robust to lighting drift; pick when the game applies post-processing color filters.</summary>
     public BrickBot.Modules.Vision.Models.ColorSpace ColorSpace { get; set; } = BrickBot.Modules.Vision.Models.ColorSpace.Rgb;
 
-    /// <summary>Direction the bar fills. The runner's per-line scan starts from the empty side
-    /// and walks toward the full side, so the boundary detection (where line-fill drops below
-    /// <see cref="LineThreshold"/>) maps cleanly to the user-perceived fill ratio.</summary>
+    /// <summary>Direction the bar fills (the empty side and full side it walks between).</summary>
     public BrickBot.Modules.Vision.Models.FillDirection Direction { get; set; } = BrickBot.Modules.Vision.Models.FillDirection.LeftToRight;
 
-    /// <summary>Per-line fill threshold (0..1). A line (column for horizontal direction, row for
-    /// vertical) is considered "filled" if at least this fraction of its pixels match the fill
-    /// color. 0.4 = robust to anti-aliasing/gradients; raise toward 0.7 if the bar has noisy
-    /// or partial sub-fills you want to ignore.</summary>
+    /// <summary>Per-line fill threshold (0..1). A line counts as "filled" when at least this
+    /// fraction of its pixels match. 0.4 ≈ robust to anti-aliasing; raise toward 0.7 if the
+    /// bar has noisy partial sub-fills you want to ignore.</summary>
     public double LineThreshold { get; set; } = 0.4;
 
-    /// <summary>Skip this fraction of the bbox width on the left when sampling — drops side icons / endcaps.</summary>
+    /// <summary>Inset fractions cropped off the empty / full sides of the bar bbox before
+    /// sampling — drops side icons / endcaps. 0.30 / 0.18 are sane defaults for most games.</summary>
     public double InsetLeftPct { get; set; } = 0.30;
-
     public double InsetRightPct { get; set; } = 0.18;
 }
 
-public sealed class ColorPresenceOptions
-{
-    public RgbColor Color { get; set; } = new(220, 30, 30);
-    public int Tolerance { get; set; } = 30;
-    public int MinArea { get; set; } = 100;
-    public int MaxResults { get; set; } = 8;
-
-    /// <summary>HSV mode replaces RGB-channel thresholds with hue-window matching — much more
-    /// stable across lighting / shading variation in the live frame.</summary>
-    public BrickBot.Modules.Vision.Models.ColorSpace ColorSpace { get; set; } = BrickBot.Modules.Vision.Models.ColorSpace.Rgb;
-}
-
-public sealed class EffectOptions
-{
-    /// <summary>How much the ROI must change (0..1) vs. baseline to count as triggered.</summary>
-    public double Threshold { get; set; } = 0.15;
-
-    /// <summary>If true, the runner snapshots the baseline on first invocation (or after Reset) — handy
-    /// for "is the screen flashing right now" without authoring a separate baseline asset.</summary>
-    public bool AutoBaseline { get; set; } = true;
-
-    /// <summary>Base64-encoded PNG of an explicit baseline image (the "quiet" state). When set,
-    /// the runner uses this instead of the first runtime frame, so the trainer can pin the
-    /// baseline to a known-good sample rather than gambling on whatever the script sees first.</summary>
-    public string? EmbeddedBaselinePng { get; set; }
-
-    /// <summary>Compare in Canny edge space instead of raw pixels. Catches shape changes
-    /// (icon swaps, buff appears) without false-positives from lighting / color shifts.</summary>
-    public bool Edge { get; set; }
-}
-
-public sealed class FeatureMatchOptions
-{
-    public string TemplateName { get; set; } = "";
-    /// <summary>Base64-encoded PNG of the template. Auto-populated by the trainer.</summary>
-    public string? EmbeddedPng { get; set; }
-    public double MinConfidence { get; set; } = 0.80;
-    public double ScaleMin { get; set; } = 0.9;
-    public double ScaleMax { get; set; } = 1.1;
-    public int ScaleSteps { get; set; } = 3;
-
-    /// <summary>Convert haystack + template to grayscale before each scale step. Default true —
-    /// feature matching is naturally cross-channel-robust so the color signal rarely helps.</summary>
-    public bool Grayscale { get; set; } = true;
-
-    /// <summary>Match in edge space — combine with multi-scale to handle scale + color drift.</summary>
-    public bool Edge { get; set; }
-}
-
-/// <summary>Region kind has no body — the definition's <see cref="DetectionDefinition.Roi"/>
-/// (with anchor support) IS the configuration. Kept as a dedicated record so the JSON file
-/// shape is self-describing and the editor can show kind-specific helper text.</summary>
-public sealed class RegionOptions
-{
-    /// <summary>Free-form description shown alongside the region in the editor's pickers.</summary>
-    public string? Note { get; set; }
-}
-
 public sealed record RgbColor(int R, int G, int B);
+
+// ============================================================================
+//  Output bindings (unchanged)
+// ============================================================================
 
 public sealed class DetectionOutput
 {
@@ -256,9 +270,8 @@ public sealed class DetectionOutput
     public DetectionOverlay? Overlay { get; set; }
 
     /// <summary>Primary output shape — drives <see cref="DetectionResult.typedValue"/>. Each kind
-    /// has a sensible default (ProgressBar → number, ColorPresence → bboxes, Effect → boolean,
-    /// Template/FeatureMatch → bbox, Region → bbox) but the user can override (e.g. ColorPresence
-    /// with output=number returns the count instead of the blob list).</summary>
+    /// has a sensible default (Bar → number, Tracker/Pattern → bbox, Text → text) but the user
+    /// can override.</summary>
     public DetectionOutputType? Type { get; set; }
 
     /// <summary>Optional debounce — only emit the result when the value has been stable for at
@@ -266,27 +279,16 @@ public sealed class DetectionOutput
     public DetectionStability? Stability { get; set; }
 }
 
-/// <summary>Output value shape — serialized as camelCase string by JsonStringEnumConverter.</summary>
 public enum DetectionOutputType
 {
-    /// <summary>found / not-found.</summary>
     Boolean,
-    /// <summary>Numeric — fill ratio, count, similarity.</summary>
     Number,
-    /// <summary>Text — OCR result or label-mapped enum.</summary>
     Text,
-    /// <summary>Single bounding rectangle.</summary>
     Bbox,
-    /// <summary>List of bounding rectangles.</summary>
     Bboxes,
-    /// <summary>Center point (cx, cy).</summary>
     Point,
 }
 
-/// <summary>Stability filter — value must be stable for the full window before being returned.
-/// JS-side wrapper compares incoming value against the last-seen value; if they differ the
-/// stability window restarts. <see cref="Tolerance"/> permits small numeric jitter to count
-/// as "same value" (e.g. HP bar reading 0.501 vs 0.502 between frames).</summary>
 public sealed class DetectionStability
 {
     public int MinDurationMs { get; set; }
@@ -296,10 +298,6 @@ public sealed class DetectionStability
 public sealed class DetectionOverlay
 {
     public bool Enabled { get; set; } = true;
-
-    /// <summary>Hex string (#RRGGBB). Frontend converts.</summary>
     public string Color { get; set; } = "#52c41a";
-
-    /// <summary>Optional label template — supports {value} / {confidence} / {count}. Empty = no label.</summary>
     public string? Label { get; set; }
 }

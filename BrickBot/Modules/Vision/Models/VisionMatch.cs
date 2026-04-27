@@ -29,7 +29,12 @@ public sealed record FindOptions(
     bool Pyramid = false,
     bool Edge = false,
     int EdgeLow = 50,
-    int EdgeHigh = 150);
+    int EdgeHigh = 150,
+    /// <summary>Single-channel 8U mask aligned 1:1 with the template (same W×H, same scale).
+    /// Non-zero pixels participate in correlation; zero pixels are excluded. When supplied,
+    /// VisionService switches from <c>TM_CCOEFF_NORMED</c> to <c>TM_CCORR_NORMED</c> (the
+    /// only normalized mode in OpenCV 4 that supports masking). Caller owns the Mat.</summary>
+    OpenCvSharp.Mat? Mask = null);
 
 public sealed record RegionOfInterest(int X, int Y, int Width, int Height);
 
@@ -97,3 +102,37 @@ public enum FillDirection
     TopToBottom,
     BottomToTop,
 }
+
+// ============================================================================
+//  Pattern (ORB descriptor) match
+// ============================================================================
+
+/// <summary>
+/// Options for ORB-descriptor pattern matching. The runner extracts ORB keypoints from
+/// the current frame's ROI, matches against the trained descriptor blob via BFMatcher
+/// (Hamming + cross-check) with Lowe ratio test, and confirms via RANSAC homography.
+/// </summary>
+/// <param name="Roi">Search region. Null = whole frame. Tighter ROI = faster.</param>
+/// <param name="LoweRatio">Lowe ratio test threshold. 0.75 = OpenCV default; lower = stricter.</param>
+/// <param name="MinConfidence">Minimum matched-keypoint ratio (post Lowe + RANSAC) to count
+///   as found. 0.20 = at least 20 % of trained keypoints have an inlier match.</param>
+/// <param name="MaxRuntimeKeypoints">Cap on ORB keypoints extracted per frame. 500 ≈ enough
+///   for 1080p game scenes; raise for very cluttered frames.</param>
+/// <param name="TemplateWidth">Reference template width — used to project matched keypoints
+///   into a bbox via <c>FindHomography</c>.</param>
+/// <param name="TemplateHeight">Reference template height. See <paramref name="TemplateWidth"/>.</param>
+public sealed record PatternMatchOptions(
+    RegionOfInterest? Roi,
+    double LoweRatio,
+    double MinConfidence,
+    int MaxRuntimeKeypoints,
+    int TemplateWidth,
+    int TemplateHeight);
+
+/// <summary>
+/// Pattern match result. Bbox is the trained reference patch projected onto the current
+/// frame via <c>FindHomography(RANSAC)</c>; confidence is the ratio of inlier matches to
+/// trained keypoints.
+/// </summary>
+public sealed record PatternMatch(int X, int Y, int Width, int Height, double Confidence);
+

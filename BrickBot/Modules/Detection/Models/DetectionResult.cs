@@ -16,20 +16,23 @@ public sealed class DetectionResult
     public bool found { get; init; }
     public double durationMs { get; init; }
 
-    /// <summary>0..1 fill ratio for progressBar; 0..1 diff for effect.</summary>
+    /// <summary>0..1 fill ratio for <c>bar</c>.</summary>
     public double? value { get; init; }
 
-    /// <summary>true when an effect threshold tripped; null for non-effect kinds.</summary>
-    public bool? triggered { get; init; }
-
+    /// <summary>Bbox: tracker = current position; pattern = matched element bbox via RANSAC homography;
+    /// bar = the bar's bounding box.</summary>
     public ResultBox? match { get; init; }
-    public ResultBox[]? blobs { get; init; }
 
-    /// <summary>Confidence reported by template / featureMatch matchers.</summary>
+    /// <summary>Confidence (0..1). Pattern: matched-keypoint ratio post Lowe + RANSAC.
+    /// Tracker: not populated (tracker doesn't expose a confidence value). Bar: not populated.</summary>
     public double? confidence { get; init; }
 
-    /// <summary>Strip auto-discovered for progressBar — useful for the UI to render the sample band.</summary>
+    /// <summary>Strip used by <c>bar</c> for the per-line fill scan — useful for UI overlay.</summary>
     public ResultBox? strip { get; init; }
+
+    /// <summary>OCR result text (Text kind only). Empty/null when the kind isn't Text or no
+    /// confident match was found.</summary>
+    public string? text { get; init; }
 }
 
 /// <summary>Lower-cased so JS receives <c>{x,y,w,h,cx,cy}</c> with no mapping.</summary>

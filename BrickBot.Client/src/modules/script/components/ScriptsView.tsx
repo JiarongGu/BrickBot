@@ -10,7 +10,7 @@ import {
   message,
 } from 'antd';
 import {
-  CameraOutlined,
+  AimOutlined,
   DeleteOutlined,
   FileOutlined,
   FolderOpenOutlined,
@@ -32,7 +32,7 @@ import {
 import { SlideInScreen } from '@/shared/components/common';
 import { FormDialog } from '@/shared/components/dialogs';
 import { useProfileStore } from '@/modules/profile';
-import { CapturePanel } from '@/modules/template';
+import { DetectionPicker } from './DetectionPicker';
 import { useScriptStore } from '../store/scriptStore';
 import { useEditorBridgeStore } from '../store/editorBridgeStore';
 import {
@@ -47,9 +47,10 @@ import type { ScriptKind } from '../types';
 import './ScriptsView.css';
 
 /**
- * Two-pane Scripts manager. File list (Main + Library) on the left, Monaco editor on the
- * right. Uses the shared compact component library + FormDialog for create. The Capture
- * Drawer surfaces the screenshot/template authoring tool while the user edits.
+ * Two-pane Scripts manager. File list (Main + Library) on the left, Monaco editor on
+ * the right. The "Detection" toolbar button slides in a picker that inserts
+ * `detect.run('name')` snippets at the cursor — replaces the old capture drawer
+ * (template authoring lives in the Tools tab now).
  */
 export const ScriptsView: React.FC = () => {
   const { t } = useTranslation();
@@ -59,7 +60,7 @@ export const ScriptsView: React.FC = () => {
   const loading = useScriptStore((s) => s.loading);
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [captureOpen, setCaptureOpen] = useState(false);
+  const [detectionPickerOpen, setDetectionPickerOpen] = useState(false);
 
   useEffect(() => {
     if (activeProfileId) void loadScripts(activeProfileId);
@@ -139,9 +140,14 @@ export const ScriptsView: React.FC = () => {
           }
           extra={
             <CompactSpace>
-              <Tooltip title={t('script.openCapture', 'Capture screen / save templates')}>
-                <CompactButton size="small" icon={<CameraOutlined />} onClick={() => setCaptureOpen(true)}>
-                  {t('script.capture', 'Capture')}
+              <Tooltip title={t('script.openDetectionPicker', 'Insert a detection reference at the cursor')}>
+                <CompactButton
+                  size="small"
+                  icon={<AimOutlined />}
+                  disabled={!selected}
+                  onClick={() => setDetectionPickerOpen(true)}
+                >
+                  {t('script.detection', 'Detection')}
                 </CompactButton>
               </Tooltip>
               {selected && (
@@ -198,12 +204,11 @@ export const ScriptsView: React.FC = () => {
       />
 
       <SlideInScreen
-        open={captureOpen}
-        title={t('script.capture', 'Capture')}
-        bodyClassName="scripts-view-capture-body"
-        onClose={() => setCaptureOpen(false)}
+        open={detectionPickerOpen}
+        title={t('script.detectionPicker.title', 'Insert detection')}
+        onClose={() => setDetectionPickerOpen(false)}
       >
-        <CapturePanel />
+        <DetectionPicker onClose={() => setDetectionPickerOpen(false)} />
       </SlideInScreen>
     </div>
   );

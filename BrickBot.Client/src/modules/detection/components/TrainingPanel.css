@@ -44,6 +44,11 @@
   overflow-y: auto;
   padding: 16px 24px;
   min-height: 0;
+  /* Flex column so a child step with `flex:1 + min-height:0` (wide variant) fills
+     the body exactly — no outer scroll. Narrow steps stay natural-height and rely
+     on the body's overflow-y for fallback scrolling. */
+  display: flex;
+  flex-direction: column;
 }
 
 .training-panel__footer {
@@ -62,6 +67,25 @@
   gap: 12px;
   max-width: 980px;
   margin: 0 auto;
+  width: 100%;
+}
+
+/* Wide variant — used by samples step where the screen-shaped preview canvas
+   wants more horizontal room. Captured frames match the game window resolution
+   (often 1920+), so 1400px keeps the canvas at near 1:1 on a typical monitor.
+   flex:1 + min-height:0 lets it consume the full body height so the inner
+   samples-review (and its strip-body) handle scrolling internally. */
+.training-step--wide {
+  max-width: 1400px;
+  flex: 1;
+  min-height: 0;
+  gap: 0;            /* samples-review is the only child; no inter-row gap needed */
+}
+
+/* Subtle "label format: <kind>" chip rendered next to the preview title. Same row
+   as the existing "#N of N · WxH" — costs zero extra vertical space. */
+.samples-review__preview-kind {
+  color: var(--color-text-tertiary);
 }
 
 .training-step__title {
@@ -184,6 +208,20 @@
   background: #0a0a0a;
 }
 
+/* Source toolbar: window picker + mode segmented + primary action.
+   Replaces the wrapping CompactSpace — keeps the row tidy on narrow screens by
+   letting controls flow but keeping consistent vertical alignment. */
+.training-source-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.training-upload {
+  margin-top: 0;
+}
+
 .training-record-bar {
   display: flex;
   align-items: center;
@@ -192,6 +230,69 @@
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-secondary);
   border-radius: var(--border-radius-base);
+}
+
+.training-record-bar__label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.training-record-bar__label--muted { color: var(--color-text-tertiary); }
+.training-record-bar__label--minw { min-width: 60px; }
+.training-record-bar__sep { font-size: 12px; }
+
+/* Compact "From recording" sub-step: slider + readout + stride share ONE row,
+   then the prominent block "Load N frames" button below. AntD default thumb +
+   track sizes (well-tuned by the design system) — we only flatten outer margin
+   and add a touch of horizontal breathing room so thumbs don't crowd the
+   readout. */
+.training-range__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.training-range__slider.ant-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  margin-inline: 6px;          /* room around thumbs at the rail edges */
+}
+
+/* Solid filled thumbs in primary color with a bg-base ring — much more visible
+   than AntD's default hollow donut on a dark background. The ::after element is
+   the visual circle; the parent .ant-slider-handle is just positioning. */
+.training-range__slider .ant-slider-handle::after {
+  background: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-bg-base);
+}
+.training-range__slider .ant-slider-handle:hover::after,
+.training-range__slider .ant-slider-handle:focus::after {
+  box-shadow: 0 0 0 3px var(--color-bg-base);
+}
+
+/* Slightly thicker, brighter track so the selected range pops on dark surfaces. */
+.training-range__slider .ant-slider-track {
+  background: var(--color-primary);
+}
+.training-range__slider .ant-slider-rail {
+  background: var(--color-border-base);
+}
+
+.training-range__readout {
+  font-size: 12px;
+  font-family: source-code-pro, Menlo, Monaco, Consolas, monospace;
+  color: var(--color-text-secondary);
+  flex: 0 0 auto;
+  white-space: nowrap;
+  min-width: 56px;             /* keeps readout from jiggling as digits change */
+  text-align: right;
+}
+
+/* Progress variant: the recording progress bar gets its own card-shaped row
+   below the "Record/Stop" button, so the button stays full-width and the bar
+   doesn't compete for horizontal space. */
+.training-record-bar--progress {
+  align-items: center;
 }
 
 .training-record-bar__progress {
@@ -311,14 +412,37 @@
   color: var(--color-text-tertiary);
 }
 
-/* Samples review pane (2-column: thumbnail strip + full preview) */
+/* Samples review pane — single 2-column grid for the entire samples step:
+   LEFT  = options column (toolbar above the strip): mode picker, source-specific
+           controls, sample list with filter pills + bulk actions.
+   RIGHT = preview column (mostly canvas) — screen-shaped to match the captured
+           frame resolution.
+   Wider left column (360px) fits the WindowSelector + sub-bar inputs without
+   wrapping; flex right column lets the canvas dominate. */
 .samples-review {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 360px 1fr;
   gap: 12px;
-  margin-top: 8px;
   outline: none;
-  min-height: 360px;
+  /* Fills the bounded `.training-step--wide` exactly (no viewport math). The flex
+     chain — body → wide step → samples-review — keeps everything inside the
+     viewport while strip-body + canvas-wrap scroll internally. */
+  flex: 1;
+  min-height: 0;
+}
+
+.samples-review__left {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.samples-review__toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .samples-review__strip {
@@ -328,9 +452,17 @@
   border: 1px solid var(--color-border-secondary);
   border-radius: var(--border-radius-base);
   overflow: hidden;
+  /* Strip lives below the toolbar in the left column. flex:1 lets it absorb
+     the leftover height after the toolbar; min-height:0 lets the inner body
+     shrink past intrinsic content height so its overflow-y:auto kicks in. */
+  flex: 1;
+  min-height: 0;
 }
 
 .samples-review__strip-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 6px 10px;
   font-size: 12px;
   color: var(--color-text-secondary);
@@ -338,14 +470,39 @@
   background: var(--color-card-header-bg);
 }
 
+.samples-review__count {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.samples-review__filter-bar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border-secondary);
+  background: var(--color-bg-elevated);
+}
+
 .samples-review__strip-body {
   flex: 1;
+  min-height: 0;          /* CRITICAL for flex children: allow shrink past content size so overflow-y kicks in. */
   overflow-y: auto;
   padding: 4px;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 480px;
+  /* No max-height — strip grows to fill the remaining left-column space and
+     scrolls internally when the sample count exceeds the visible area. */
+}
+
+.samples-review__strip-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
 }
 
 .samples-review__row {
@@ -362,6 +519,20 @@
 .samples-review__row--active {
   background: var(--color-primary-bg);
   border-color: var(--color-primary);
+}
+/* Multi-selected row: tinted left border + faint background — distinguishable from
+   the active preview row (which has full primary-bg fill). */
+.samples-review__row--selected {
+  background: var(--color-primary-bg-hover, var(--color-primary-bg));
+  border-color: var(--color-primary);
+}
+.samples-review__row--active.samples-review__row--selected {
+  outline: 1px solid var(--color-primary);
+  outline-offset: -1px;
+}
+/* Unlabeled rows get a subtle warning tint so users can scan for missing labels. */
+.samples-review__row--unlabeled:not(.samples-review__row--active):not(.samples-review__row--selected) {
+  background: var(--color-warning-bg);
 }
 
 .samples-review__thumb {
@@ -403,13 +574,27 @@
   border-radius: var(--border-radius-base);
   padding: 10px;
   min-width: 0;
+  min-height: 0;          /* Same flex-shrink trick — keeps the canvas-wrap inside the bounded grid row. */
+  overflow: hidden;
 }
 
 .samples-review__preview-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 12px;
+}
+
+/* Always-visible kbd hint between the title and the bulk-action buttons.
+   flex:1 absorbs leftover width so it doesn't push the buttons; ellipsis on
+   overflow keeps the row from wrapping when the canvas is narrow. */
+.samples-review__preview-kbhint {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .samples-review__preview-title {
@@ -425,8 +610,9 @@
   background: #0a0a0a;
   border-radius: var(--border-radius-base);
   overflow: hidden;
-  min-height: 240px;
-  max-height: 480px;
+  min-height: 320px;
+  /* No max-height: the right pane grows with samples-review's height so the
+     screen-shaped canvas can use all available room. */
 }
 
 .samples-review__canvas {
@@ -455,17 +641,33 @@
   gap: 4px;
 }
 
-.samples-review__hint {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  text-align: right;
-}
 
 .samples-review__empty {
   display: flex;
+  flex: 1;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  flex: 1;
+  gap: 8px;
+  padding: 24px;
   color: var(--color-text-tertiary);
+  text-align: center;
+}
+
+.samples-review__empty-icon {
+  font-size: 36px;
+  color: var(--color-text-quaternary);
+}
+
+.samples-review__empty-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.samples-review__empty-hint {
   font-size: 12px;
+  color: var(--color-text-tertiary);
+  max-width: 320px;
+  line-height: 1.5;
 }

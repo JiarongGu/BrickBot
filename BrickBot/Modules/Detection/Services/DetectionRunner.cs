@@ -1,37 +1,48 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using BrickBot.Modules.Capture.Models;
 using BrickBot.Modules.Core.Exceptions;
 using BrickBot.Modules.Detection.Models;
-using BrickBot.Modules.Template.Services;
 using BrickBot.Modules.Vision.Models;
 using BrickBot.Modules.Vision.Services;
 using OpenCvSharp;
-using VisionFeatureMatchOptions = BrickBot.Modules.Vision.Models.FeatureMatchOptions;
+using OpenCvSharp.Tracking;
 
 namespace BrickBot.Modules.Detection.Services;
 
+/// <summary>
+/// Runs a <see cref="DetectionDefinition"/> against a frame and returns the typed result.
+/// One per host (singleton); per-Run state (trackers, last-results) is held internally
+/// and torn down by <see cref="Reset"/>.
+///
+/// Dispatch table — only four kinds:
+///   • <see cref="DetectionKind.Tracker"/> — stateful OpenCV visual tracker.
+///   • <see cref="DetectionKind.Pattern"/> — ORB descriptor match (background-invariant).
+///   • <see cref="DetectionKind.Text"/>    — Tesseract OCR (NOT IMPLEMENTED YET — phase C).
+///   • <see cref="DetectionKind.Bar"/>     — fill-ratio measurement on a known bbox.
+/// </summary>
 public sealed class DetectionRunner : IDetectionRunner, IDisposable
 {
     private readonly IVisionService _vision;
-    private readonly ITemplateLoader _templates;
-    private readonly ITemplateFileService _templateFiles;
-
-    /// <summary>Per-detection effect baselines, keyed by "{profileId}/{detectionId}". Disposed on Reset().</summary>
-    private readonly ConcurrentDictionary<string, Mat> _effectBaselines = new(StringComparer.Ordinal);
 
     /// <summary>Last result per detection id within the current Run — drives cross-detection
-    /// ROI references. Cleared on Reset(). Updated whenever <see cref="Run"/> finishes.</summary>
+    /// ROI references (<see cref="DetectionRoi.FromDetectionId"/>) and bar's
+    /// <see cref="BarOptions.AnchorPatternId"/>. Cleared on Reset().</summary>
     private readonly ConcurrentDictionary<string, DetectionResult> _lastResults = new(StringComparer.Ordinal);
 
-    public DetectionRunner(
-        IVisionService vision,
-        ITemplateLoader templates,
-        ITemplateFileService templateFiles)
+    /// <summary>Per-detection live tracker state. Trackers are stateful — initialized once
+    /// with the saved init frame + bbox, then updated each tick. Reset() disposes them all
+    /// so each new Run starts fresh.</summary>
+    private readonly ConcurrentDictionary<string, Tracker> _trackers = new(StringComparer.Ordinal);
+
+    /// <summary>Tracks whether each cached tracker has been .Init()'d yet — OpenCvSharp's
+    /// Tracker has no <c>IsInited</c> getter, so we shadow it.</summary>
+    private readonly ConcurrentDictionary<string, bool> _trackerInited = new(StringComparer.Ordinal);
+
+    public DetectionRunner(IVisionService vision)
     {
         _vision = vision;
-        _templates = templates;
-        _templateFiles = templateFiles;
     }
 
     public DetectionResult Run(string profileId, DetectionDefinition def, CaptureFrame frame)
@@ -40,12 +51,10 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         var roi = ResolveRoi(def.Roi, frame);
         var result = def.Kind switch
         {
-            DetectionKind.Region => RunRegion(def, roi, sw),
-            DetectionKind.Template => RunTemplate(profileId, def, frame, roi, sw),
-            DetectionKind.ProgressBar => RunProgressBar(profileId, def, frame, roi, sw),
-            DetectionKind.ColorPresence => RunColorPresence(def, frame, roi, sw),
-            DetectionKind.Effect => RunEffect(profileId, def, frame, roi, sw),
-            DetectionKind.FeatureMatch => RunFeatureMatch(profileId, def, frame, roi, sw),
+            DetectionKind.Tracker => RunTracker(profileId, def, frame, sw),
+            DetectionKind.Pattern => RunPattern(def, frame, roi, sw),
+            DetectionKind.Text    => RunText(def, frame, roi, sw),
+            DetectionKind.Bar     => RunBar(def, frame, roi, sw),
             _ => throw new OperationException("DETECTION_KIND_UNSUPPORTED",
                 new() { ["kind"] = def.Kind.ToString() }),
         };
@@ -55,128 +64,200 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
 
     public void Reset()
     {
-        foreach (var (_, mat) in _effectBaselines) mat.Dispose();
-        _effectBaselines.Clear();
+        foreach (var (_, tr) in _trackers) tr.Dispose();
+        _trackers.Clear();
+        _trackerInited.Clear();
         _lastResults.Clear();
     }
 
     public void Dispose() => Reset();
 
-    // ---------------- Per-kind runners ----------------
+    // ============================================================
+    //  Tracker — stateful KCF / CSRT / MIL
+    // ============================================================
 
-    private DetectionResult RunRegion(DetectionDefinition def, RegionOfInterest? roi, Stopwatch sw)
+    private DetectionResult RunTracker(string profileId, DetectionDefinition def, CaptureFrame frame, Stopwatch sw)
     {
-        // Region kind: ROI is the result. Found = ROI resolved to non-empty area.
-        if (roi is null || roi.Width <= 0 || roi.Height <= 0)
+        var opt = def.Tracker ?? throw MissingOpts("tracker");
+        if (string.IsNullOrEmpty(opt.InitFramePng) || opt.InitW <= 0 || opt.InitH <= 0)
         {
-            return new DetectionResult
-            {
-                id = def.Id, name = def.Name, kind = def.Kind,
-                found = false,
-                durationMs = sw.Elapsed.TotalMilliseconds,
-            };
+            throw new OperationException("DETECTION_TRACKER_NOT_TRAINED", new() { ["id"] = def.Id });
         }
+
+        var key = $"{profileId}/{def.Id}";
+        var tracker = _trackers.GetOrAdd(key, _ => CreateTracker(opt));
+
+        if (tracker is { } t && !TrackerIsInited(key))
+        {
+            using var initBytes = Cv2.ImDecode(Convert.FromBase64String(opt.InitFramePng), ImreadModes.Color);
+            if (initBytes.Empty())
+            {
+                throw new OperationException("DETECTION_TRACKER_INIT_DECODE_FAILED", new() { ["id"] = def.Id });
+            }
+            t.Init(initBytes, new Rect(opt.InitX, opt.InitY, opt.InitW, opt.InitH));
+            _trackerInited[key] = true;
+        }
+
+        var bbox = new Rect();
+        var ok = tracker!.Update(frame.Image, ref bbox);
+
+        if (!ok && opt.ReacquireOnLost)
+        {
+            tracker.Dispose();
+            _trackers.TryRemove(key, out _);
+            _trackerInited.TryRemove(key, out _);
+        }
+
         return new DetectionResult
         {
             id = def.Id, name = def.Name, kind = def.Kind,
-            found = true,
+            found = ok,
             durationMs = sw.Elapsed.TotalMilliseconds,
+            match = ok ? ToBox(bbox.X, bbox.Y, bbox.Width, bbox.Height) : null,
+        };
+    }
+
+    private bool TrackerIsInited(string key) =>
+        _trackerInited.TryGetValue(key, out var b) && b;
+
+    private static Tracker CreateTracker(TrackerOptions opt) => opt.Algorithm switch
+    {
+        TrackerAlgorithm.Csrt => TrackerCSRT.Create(),
+        TrackerAlgorithm.Mil  => TrackerMIL.Create(),
+        _                     => TrackerKCF.Create(),
+    };
+
+    // ============================================================
+    //  Pattern — ORB descriptor match
+    // ============================================================
+
+    private DetectionResult RunPattern(DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
+    {
+        var opt = def.Pattern ?? throw MissingOpts("pattern");
+        if (string.IsNullOrEmpty(opt.Descriptors) || opt.KeypointCount <= 0)
+        {
+            throw new OperationException("DETECTION_PATTERN_NOT_TRAINED", new() { ["id"] = def.Id });
+        }
+
+        using var trainDescriptors = DeserializeDescriptors(opt.Descriptors, opt.KeypointCount);
+
+        var match = _vision.MatchPattern(frame, trainDescriptors,
+            new PatternMatchOptions(
+                Roi: roi,
+                LoweRatio: opt.LoweRatio,
+                MinConfidence: opt.MinConfidence,
+                MaxRuntimeKeypoints: opt.MaxRuntimeKeypoints,
+                TemplateWidth: opt.TemplateWidth,
+                TemplateHeight: opt.TemplateHeight));
+
+        return new DetectionResult
+        {
+            id = def.Id, name = def.Name, kind = def.Kind,
+            found = match is not null,
+            durationMs = sw.Elapsed.TotalMilliseconds,
+            match = match is null ? null : ToBox(match.X, match.Y, match.Width, match.Height),
+            confidence = match?.Confidence,
+        };
+    }
+
+    /// <summary>
+    /// Decode a base64-encoded BRISK descriptor blob back into an 8U N×64 Mat. Trainer
+    /// encoded it row-major; this just lays the bytes back into a Mat with the same shape.
+    /// Width is inferred from <c>bytes.Length / rows</c> — supports legacy ORB (32-byte) and
+    /// current BRISK (64-byte) blobs without a schema bump.
+    /// </summary>
+    private static Mat DeserializeDescriptors(string base64, int rows)
+    {
+        var bytes = Convert.FromBase64String(base64);
+        if (rows <= 0 || bytes.Length % rows != 0)
+        {
+            throw new OperationException("DETECTION_PATTERN_DESCRIPTORS_CORRUPT",
+                new() { ["expected"] = "rows-aligned", ["actual"] = bytes.Length.ToString() });
+        }
+        var width = bytes.Length / rows;
+        if (width != 32 && width != 64)
+        {
+            throw new OperationException("DETECTION_PATTERN_DESCRIPTORS_CORRUPT",
+                new() { ["expected"] = "32 or 64 byte descriptors", ["actual"] = width.ToString() });
+        }
+        var mat = new Mat(rows, width, MatType.CV_8UC1);
+        System.Runtime.InteropServices.Marshal.Copy(bytes, 0, mat.Data, bytes.Length);
+        return mat;
+    }
+
+    // ============================================================
+    //  Text — Tesseract OCR (phase C — stub)
+    // ============================================================
+
+    private DetectionResult RunText(DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
+    {
+        var opt = def.Text ?? throw MissingOpts("text");
+        if (roi is null || roi.Width <= 0 || roi.Height <= 0)
+        {
+            throw new OperationException("DETECTION_ROI_REQUIRED", new() { ["id"] = def.Id });
+        }
+
+        var (text, confidence) = _vision.OcrRoi(frame, roi, opt);
+
+        var matched = !string.IsNullOrEmpty(text)
+            && confidence >= opt.MinConfidence
+            && (string.IsNullOrEmpty(opt.MatchRegex) || Regex.IsMatch(text, opt.MatchRegex));
+
+        return new DetectionResult
+        {
+            id = def.Id, name = def.Name, kind = def.Kind,
+            found = matched,
+            durationMs = sw.Elapsed.TotalMilliseconds,
+            text = matched ? text : null,
+            confidence = confidence / 100.0,
             match = ToBox(roi.X, roi.Y, roi.Width, roi.Height),
         };
     }
 
-    private DetectionResult RunTemplate(string profileId, DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
+    // ============================================================
+    //  Bar — HP / MP / cooldown fill ratio
+    // ============================================================
+
+    private DetectionResult RunBar(DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
     {
-        var opt = def.Template ?? throw MissingOpts("template");
+        var opt = def.Bar ?? throw MissingOpts("bar");
 
-        using var template = ResolveTemplateMat(profileId, opt.EmbeddedPng, opt.TemplateName);
-        var match = _vision.Find(frame, template, new FindOptions(
-            opt.MinConfidence, roi, opt.Scale, opt.Grayscale, opt.Pyramid, opt.Edge));
-
-        return new DetectionResult
+        // Locate the bar's bbox: either from a referenced Pattern detection's last match,
+        // or from the detection's own ROI directly.
+        Rect bbox;
+        if (!string.IsNullOrEmpty(opt.AnchorPatternId)
+            && _lastResults.TryGetValue(opt.AnchorPatternId, out var anchor)
+            && anchor.match is { } m)
         {
-            id = def.Id, name = def.Name, kind = def.Kind,
-            found = match is not null,
-            durationMs = sw.Elapsed.TotalMilliseconds,
-            match = match is null ? null : ToBox(match.X, match.Y, match.Width, match.Height),
-            confidence = match?.Confidence,
-        };
-    }
-
-    private DetectionResult RunFeatureMatch(string profileId, DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
-    {
-        var opt = def.FeatureMatch ?? throw MissingOpts("featureMatch");
-
-        using var template = ResolveTemplateMat(profileId, opt.EmbeddedPng, opt.TemplateName);
-        var match = _vision.FindFeatures(frame, template, new VisionFeatureMatchOptions(
-            opt.MinConfidence, roi, opt.ScaleMin, opt.ScaleMax, opt.ScaleSteps, opt.Edge));
-
-        return new DetectionResult
+            bbox = new Rect(m.x, m.y, m.w, m.h);
+        }
+        else if (roi is not null && roi.Width > 0 && roi.Height > 0)
         {
-            id = def.Id, name = def.Name, kind = def.Kind,
-            found = match is not null,
-            durationMs = sw.Elapsed.TotalMilliseconds,
-            match = match is null ? null : ToBox(match.X, match.Y, match.Width, match.Height),
-            confidence = match?.Confidence,
-        };
-    }
-
-    private DetectionResult RunProgressBar(string profileId, DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
-    {
-        var opt = def.ProgressBar ?? throw MissingOpts("progressBar");
-
-        // Two ways to provide the bar's bbox:
-        //   (a) Template match — opt.TemplateName + opt.* template options.
-        //   (b) Caller supplies the bbox directly via def.Roi (anchored / fromDetection).
-        // Picking (b) skips the template stage entirely so users can compose bar fill on top
-        // of another detection's match (e.g. find HUD region first → measure fill within it).
-        VisionMatch? bar;
-        bool fromRoi = string.IsNullOrEmpty(opt.TemplateName) && string.IsNullOrEmpty(opt.EmbeddedPng);
-        if (fromRoi)
-        {
-            if (roi is null || roi.Width <= 0 || roi.Height <= 0)
-            {
-                throw new OperationException("DETECTION_PROGRESSBAR_NEEDS_ROI_OR_TEMPLATE",
-                    new() { ["id"] = def.Id });
-            }
-            bar = new VisionMatch(roi.X, roi.Y, roi.Width, roi.Height, 1.0);
+            bbox = new Rect(roi.X, roi.Y, roi.Width, roi.Height);
         }
         else
         {
-            using var template = ResolveTemplateMat(profileId, opt.EmbeddedPng, opt.TemplateName);
-            bar = _vision.Find(frame, template, new FindOptions(
-                opt.MinConfidence, roi, opt.Scale, opt.Grayscale, opt.Pyramid, opt.TemplateEdge));
-            if (bar is null)
-            {
-                return new DetectionResult
-                {
-                    id = def.Id, name = def.Name, kind = def.Kind,
-                    found = false, value = 0.0,
-                    durationMs = sw.Elapsed.TotalMilliseconds,
-                };
-            }
+            throw new OperationException("DETECTION_BAR_NEEDS_ROI_OR_ANCHOR", new() { ["id"] = def.Id });
         }
 
-        // Measure fill via per-line directional scan inside the bar bbox (with insets).
-        // For horizontal directions, inset is applied left/right; for vertical, top/bottom.
         var fillColor = new ColorSample(opt.FillColor.R, opt.FillColor.G, opt.FillColor.B);
         var horizontal = opt.Direction == FillDirection.LeftToRight || opt.Direction == FillDirection.RightToLeft;
 
+        // Sample a thin strip across the densest fill row/column inside the bar (drops icon
+        // endcaps via the inset percentages), then measure linear fill ratio along it.
         int stripX, stripY, stripW, stripH;
         if (horizontal)
         {
-            var insetA = (int)(bar.Width * opt.InsetLeftPct);
-            var insetB = (int)(bar.Width * opt.InsetRightPct);
-            stripX = bar.X + insetA;
-            stripW = Math.Max(1, bar.Width - insetA - insetB);
+            var insetA = (int)(bbox.Width * opt.InsetLeftPct);
+            var insetB = (int)(bbox.Width * opt.InsetRightPct);
+            stripX = bbox.X + insetA;
+            stripW = Math.Max(1, bbox.Width - insetA - insetB);
 
-            // Find the brightest fill row inside the bbox; sample a 5px strip around it.
-            // PercentBar is fine here because we only need a relative score across rows.
-            var brightestY = bar.Y;
+            var brightestY = bbox.Y;
             var brightestPct = -1.0;
-            for (var dy = 0; dy < bar.Height; dy++)
+            for (var dy = 0; dy < bbox.Height; dy++)
             {
-                var y = bar.Y + dy;
+                var y = bbox.Y + dy;
                 var pct = _vision.PercentBar(frame, new RegionOfInterest(stripX, y, stripW, 1),
                     fillColor, opt.Tolerance, opt.ColorSpace);
                 if (pct > brightestPct) { brightestPct = pct; brightestY = y; }
@@ -186,17 +267,16 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         }
         else
         {
-            var insetA = (int)(bar.Height * opt.InsetLeftPct);
-            var insetB = (int)(bar.Height * opt.InsetRightPct);
-            stripY = bar.Y + insetA;
-            stripH = Math.Max(1, bar.Height - insetA - insetB);
+            var insetA = (int)(bbox.Height * opt.InsetLeftPct);
+            var insetB = (int)(bbox.Height * opt.InsetRightPct);
+            stripY = bbox.Y + insetA;
+            stripH = Math.Max(1, bbox.Height - insetA - insetB);
 
-            // Find brightest fill column for vertical bars.
-            var brightestX = bar.X;
+            var brightestX = bbox.X;
             var brightestPct = -1.0;
-            for (var dx = 0; dx < bar.Width; dx++)
+            for (var dx = 0; dx < bbox.Width; dx++)
             {
-                var x = bar.X + dx;
+                var x = bbox.X + dx;
                 var pct = _vision.PercentBar(frame, new RegionOfInterest(x, stripY, 1, stripH),
                     fillColor, opt.Tolerance, opt.ColorSpace);
                 if (pct > brightestPct) { brightestPct = pct; brightestX = x; }
@@ -213,104 +293,16 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         {
             id = def.Id, name = def.Name, kind = def.Kind,
             found = true, value = fill,
-            confidence = fromRoi ? null : bar.Confidence,
             durationMs = sw.Elapsed.TotalMilliseconds,
-            match = ToBox(bar.X, bar.Y, bar.Width, bar.Height),
+            match = ToBox(bbox.X, bbox.Y, bbox.Width, bbox.Height),
             strip = ToBox(strip.X, strip.Y, strip.Width, strip.Height),
         };
     }
 
-    private DetectionResult RunColorPresence(DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
-    {
-        var opt = def.ColorPresence ?? throw MissingOpts("colorPresence");
-        var color = opt.Color;
-        var t = opt.Tolerance;
-        var range = new ColorRange(
-            Math.Max(0, color.R - t), Math.Min(255, color.R + t),
-            Math.Max(0, color.G - t), Math.Min(255, color.G + t),
-            Math.Max(0, color.B - t), Math.Min(255, color.B + t));
+    // ============================================================
+    //  ROI resolution
+    // ============================================================
 
-        var blobs = _vision.FindColors(frame, range,
-            new FindColorsOptions(roi, opt.MinArea, opt.MaxResults, opt.ColorSpace));
-
-        return new DetectionResult
-        {
-            id = def.Id, name = def.Name, kind = def.Kind,
-            found = blobs.Count > 0,
-            value = blobs.Count,
-            durationMs = sw.Elapsed.TotalMilliseconds,
-            blobs = blobs.Select(b => ToBox(b.X, b.Y, b.Width, b.Height)).ToArray(),
-        };
-    }
-
-    private DetectionResult RunEffect(string profileId, DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
-    {
-        var opt = def.Effect ?? throw MissingOpts("effect");
-        if (roi is null || roi.Width <= 0 || roi.Height <= 0)
-        {
-            throw new OperationException("DETECTION_ROI_REQUIRED", new() { ["id"] = def.Id });
-        }
-
-        var key = $"{profileId}/{def.Id}";
-
-        if (!_effectBaselines.TryGetValue(key, out var baseline))
-        {
-            if (!string.IsNullOrEmpty(opt.EmbeddedBaselinePng))
-            {
-                // Trainer-pinned baseline. Decode once + cache so subsequent runs reuse it.
-                var bytes = Convert.FromBase64String(opt.EmbeddedBaselinePng);
-                var decoded = Cv2.ImDecode(bytes, ImreadModes.Color);
-                if (decoded.Empty()) throw new OperationException("DETECTION_TEMPLATE_DECODE_FAILED");
-                baseline = decoded;
-                _effectBaselines[key] = baseline;
-            }
-            else if (opt.AutoBaseline)
-            {
-                baseline = SnapshotBaseline(frame, roi);
-                _effectBaselines[key] = baseline;
-                return new DetectionResult
-                {
-                    id = def.Id, name = def.Name, kind = def.Kind,
-                    found = true, triggered = false, value = 0.0,
-                    durationMs = sw.Elapsed.TotalMilliseconds,
-                    match = ToBox(roi.X, roi.Y, roi.Width, roi.Height),
-                };
-            }
-            else
-            {
-                return new DetectionResult
-                {
-                    id = def.Id, name = def.Name, kind = def.Kind,
-                    found = false, triggered = false, value = 0.0,
-                    durationMs = sw.Elapsed.TotalMilliseconds,
-                };
-            }
-        }
-
-        var diff = _vision.Diff(frame, baseline, roi, opt.Edge);
-        return new DetectionResult
-        {
-            id = def.Id, name = def.Name, kind = def.Kind,
-            found = true,
-            triggered = diff >= opt.Threshold,
-            value = diff,
-            durationMs = sw.Elapsed.TotalMilliseconds,
-            match = ToBox(roi.X, roi.Y, roi.Width, roi.Height),
-        };
-    }
-
-    // ---------------- ROI resolution ----------------
-
-    /// <summary>
-    /// Resolve a <see cref="DetectionRoi"/> into an absolute <see cref="RegionOfInterest"/>.
-    /// Three modes (priority order):
-    ///   1. <c>FromDetectionId</c> set → use the referenced detection's last match as parent;
-    ///      X/Y/W/H are interpreted as inset margins (left, top, right, bottom).
-    ///   2. <c>Anchor</c> set → resolve X/Y as offsets from the anchor on the current frame;
-    ///      W/H are absolute sizes.
-    ///   3. Otherwise → X/Y/W/H is absolute window-relative pixels.
-    /// Returns null when the ROI is missing or the dependency hasn't run yet.
-    /// </summary>
     private RegionOfInterest? ResolveRoi(DetectionRoi? roi, CaptureFrame frame)
     {
         if (roi is null) return null;
@@ -319,8 +311,6 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         {
             if (!_lastResults.TryGetValue(roi.FromDetectionId, out var src) || src.match is null)
             {
-                // Dependency not resolved yet (or didn't match). Treat as missing ROI; downstream
-                // kinds that need ROI will error with DETECTION_ROI_REQUIRED.
                 return null;
             }
             var insetL = Math.Max(0, roi.X);
@@ -343,11 +333,6 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         return new RegionOfInterest(roi.X, roi.Y, roi.W, roi.H);
     }
 
-    /// <summary>
-    /// Anchor → (originX, originY) in window-relative pixels. Origin is the anchor's natural
-    /// corner / midpoint; ROI's X/Y are added on top so positive offsets always point inward.
-    /// For a top-right anchor with X=-100 W=80, the ROI lands 100px from the right edge.
-    /// </summary>
     private static (int x, int y) AnchorOffset(AnchorOrigin anchor, int frameW, int frameH, int roiW, int roiH)
     {
         int x = anchor switch
@@ -367,71 +352,13 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         return (x, y);
     }
 
-    // ---------------- Helpers ----------------
-
-    private static Mat SnapshotBaseline(CaptureFrame frame, RegionOfInterest roi)
-    {
-        var rect = new Rect(
-            Math.Clamp(roi.X, 0, frame.Width),
-            Math.Clamp(roi.Y, 0, frame.Height),
-            Math.Clamp(roi.Width, 0, frame.Width - Math.Clamp(roi.X, 0, frame.Width)),
-            Math.Clamp(roi.Height, 0, frame.Height - Math.Clamp(roi.Y, 0, frame.Height)));
-        return new Mat(frame.Image, rect).Clone();
-    }
+    // ============================================================
+    //  Helpers
+    // ============================================================
 
     private static ResultBox ToBox(int x, int y, int w, int h) =>
         new() { x = x, y = y, w = w, h = h, cx = x + w / 2, cy = y + h / 2 };
 
     private static OperationException MissingOpts(string kind) =>
         new("DETECTION_OPTIONS_MISSING", new() { ["kind"] = kind });
-
-    private static OperationException MissingTemplate(string id) =>
-        new("DETECTION_TEMPLATE_REQUIRED", new() { ["id"] = id });
-
-    private Mat LoadTemplate(string profileId, string templateRef)
-    {
-        // templateRef may be either a Guid id (preferred — set by the editor) or a legacy
-        // user-typed name. Try id first (fast, file-only check); fall back to name lookup
-        // through the repository.
-        var path = _templateFiles.GetPath(profileId, templateRef);
-        if (File.Exists(path))
-        {
-            try { return _templates.Load(path); }
-            catch (FileNotFoundException) { /* swallow → name lookup below */ }
-        }
-
-        path = _templateFiles.ResolvePathAsync(profileId, templateRef).GetAwaiter().GetResult()
-            ?? throw new OperationException("DETECTION_TEMPLATE_NOT_FOUND",
-                new() { ["template"] = templateRef });
-        try { return _templates.Load(path); }
-        catch (FileNotFoundException ex)
-        {
-            throw new OperationException("DETECTION_TEMPLATE_NOT_FOUND",
-                new() { ["template"] = templateRef }, ex.Message, ex);
-        }
-    }
-
-    /// <summary>
-    /// Resolve a template Mat from a definition's options: prefer embedded PNG bytes (the
-    /// detection is self-contained), fall back to the legacy templateRef lookup. Caller owns
-    /// disposal of the returned Mat — embedded path returns a fresh decode each call.
-    /// </summary>
-    private Mat ResolveTemplateMat(string profileId, string? embeddedPng, string templateRef)
-    {
-        if (!string.IsNullOrEmpty(embeddedPng))
-        {
-            var bytes = Convert.FromBase64String(embeddedPng);
-            var mat = Cv2.ImDecode(bytes, ImreadModes.Color);
-            if (mat.Empty())
-            {
-                throw new OperationException("DETECTION_TEMPLATE_DECODE_FAILED");
-            }
-            return mat;
-        }
-        if (string.IsNullOrEmpty(templateRef))
-        {
-            throw new OperationException("DETECTION_TEMPLATE_REQUIRED");
-        }
-        return LoadTemplate(profileId, templateRef);
-    }
 }

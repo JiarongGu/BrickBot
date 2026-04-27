@@ -4,12 +4,18 @@
     <!-- Embed all managed dependencies automatically -->
     <!-- No need to specify IncludeAssemblies - Costura will auto-detect -->
 
-    <!-- Exclude native libraries that cannot be embedded -->
+    <!-- Exclude native libraries that cannot be embedded.
+         OpenCvSharpExtern.dll is the native runtime for OpenCvSharp4 — must be flagged so
+         Costura embeds it as native (extracted to disk on startup) instead of trying to
+         load it as a managed assembly, which produces "entry point not found" errors at
+         runtime when the loader can't find the unmanaged exports. -->
     <Unmanaged32Assemblies>
       WebView2Loader
+      OpenCvSharpExtern
     </Unmanaged32Assemblies>
     <Unmanaged64Assemblies>
       WebView2Loader
+      OpenCvSharpExtern
     </Unmanaged64Assemblies>
 
     <!-- Don't create temp files, extract to memory -->

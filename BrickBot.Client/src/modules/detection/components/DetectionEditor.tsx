@@ -1,5 +1,5 @@
 import React from 'react';
-import { ColorPicker, Slider, Tooltip } from 'antd';
+import { ColorPicker, Slider } from 'antd';
 import type { Color as AntColor } from 'antd/es/color-picker';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
@@ -9,29 +9,26 @@ import {
   CompactSelect,
   CompactSwitch,
 } from '@/shared/components/compact';
-import type { TemplateInfo } from '@/modules/template';
 import type {
   AnchorOrigin,
-  ColorPresenceOptions,
+  BarOptions,
   ColorSpace,
   DetectionDefinition,
   DetectionKind,
   DetectionRoi,
-  EffectOptions,
-  FeatureMatchOptions,
   FillDirection,
-  ProgressBarOptions,
-  RegionOptions,
+  PatternOptions,
   RgbColor,
-  TemplateOptions,
+  TextOptions,
+  TrackerAlgorithm,
+  TrackerOptions,
 } from '../types';
-import { ANCHOR_ORIGINS, DETECTION_KIND_LABEL } from '../types';
+import { ANCHOR_ORIGINS, DETECTION_KIND_LABEL, newDetection } from '../types';
 
 interface Props {
   draft: DetectionDefinition;
-  /** All detections, used to populate the "ROI from another detection" dropdown. */
+  /** All detections, used to populate the "ROI from another detection" + "anchor pattern" dropdowns. */
   siblingDetections: DetectionDefinition[];
-  templates: TemplateInfo[];
   onChange: (next: DetectionDefinition) => void;
 }
 
@@ -45,46 +42,26 @@ function roiMode(roi: DetectionRoi | undefined): RoiMode {
 }
 
 /**
- * Right-pane editor — name + kind picker + ROI section (manual / anchored / linked) +
- * per-kind options + output bindings.
- *
- * The big change vs. the older editor: ROI is now a tabbed section so users can choose
- * between absolute pixels, anchor-relative (top-right HUD that moves with window resize),
- * or linked (use another detection's match as the ROI). All ROI modes are persisted into
- * the same DetectionRoi shape — the runner picks the right resolver at run time.
+ * Right-pane editor for a {@link DetectionDefinition}. Four detection kinds — each with its
+ * own simple form. The training wizard authors the heavy fields (init frame for tracker,
+ * descriptors for pattern); this editor exposes the post-training tunables.
  */
-export const DetectionEditor: React.FC<Props> = ({ draft, siblingDetections, templates, onChange }) => {
+export const DetectionEditor: React.FC<Props> = ({ draft, siblingDetections, onChange }) => {
   const { t } = useTranslation();
 
   const setKind = (kind: DetectionKind) => {
-    const next: DetectionDefinition = { ...draft, kind };
-    if (kind !== 'template') next.template = undefined;
-    if (kind !== 'progressBar') next.progressBar = undefined;
-    if (kind !== 'colorPresence') next.colorPresence = undefined;
-    if (kind !== 'effect') next.effect = undefined;
-    if (kind !== 'featureMatch') next.featureMatch = undefined;
-    if (kind !== 'region') next.region = undefined;
-    if (kind === 'template' && !draft.template) {
-      next.template = { templateName: '', minConfidence: 0.85, scale: 1.0, grayscale: true, pyramid: false, edge: false };
-    } else if (kind === 'progressBar' && !draft.progressBar) {
-      next.progressBar = {
-        templateName: '', minConfidence: 0.80, templateEdge: true,
-        scale: 1.0, grayscale: true, pyramid: false,
-        fillColor: { r: 220, g: 30, b: 30 },
-        tolerance: 60, colorSpace: 'rgb',
-        direction: 'leftToRight', lineThreshold: 0.4,
-        insetLeftPct: 0.30, insetRightPct: 0.18,
-      };
-    } else if (kind === 'colorPresence' && !draft.colorPresence) {
-      next.colorPresence = { color: { r: 220, g: 30, b: 30 }, tolerance: 30, minArea: 100, maxResults: 8, colorSpace: 'rgb' };
-    } else if (kind === 'effect' && !draft.effect) {
-      next.effect = { threshold: 0.15, autoBaseline: true, edge: false };
-    } else if (kind === 'featureMatch' && !draft.featureMatch) {
-      next.featureMatch = { templateName: '', minConfidence: 0.80, scaleMin: 0.9, scaleMax: 1.1, scaleSteps: 3, grayscale: true, edge: false };
-    } else if (kind === 'region' && !draft.region) {
-      next.region = {};
-    }
-    onChange(next);
+    if (kind === draft.kind) return;
+    // Seed fresh per-kind defaults; keep the user-edited identity fields (name/group/etc).
+    const fresh = newDetection(kind);
+    onChange({
+      ...fresh,
+      id: draft.id,
+      name: draft.name,
+      group: draft.group,
+      enabled: draft.enabled,
+      roi: draft.roi,
+      output: draft.output,
+    });
   };
 
   return (
@@ -96,7 +73,7 @@ export const DetectionEditor: React.FC<Props> = ({ draft, siblingDetections, tem
           <span className="detection-field__label">{t('detection.field.name', 'Name')}</span>
           <CompactInput
             value={draft.name}
-            placeholder={t('detection.placeholder.name', 'e.g. HP Bar, Buff Up, Boss Spawn') as string}
+            placeholder={t('detection.placeholder.name', 'e.g. HP Bar, Boss Sprite, Quest Banner') as string}
             onChange={(e) => onChange({ ...draft, name: e.target.value })}
           />
         </div>
@@ -134,56 +111,53 @@ export const DetectionEditor: React.FC<Props> = ({ draft, siblingDetections, tem
       <RoiSection draft={draft} siblings={siblingDetections} onChange={onChange} />
 
       {/* Per-kind */}
-      {draft.kind === 'template' && draft.template && (
-        <TemplateForm opt={draft.template} templates={templates} onChange={(opt) => onChange({ ...draft, template: opt })} />
+      {draft.kind === 'tracker' && draft.tracker && (
+        <TrackerForm opt={draft.tracker} onChange={(opt) => onChange({ ...draft, tracker: opt })} />
       )}
-      {draft.kind === 'progressBar' && draft.progressBar && (
-        <ProgressBarForm opt={draft.progressBar} templates={templates} onChange={(opt) => onChange({ ...draft, progressBar: opt })} />
+      {draft.kind === 'pattern' && draft.pattern && (
+        <PatternForm opt={draft.pattern} onChange={(opt) => onChange({ ...draft, pattern: opt })} />
       )}
-      {draft.kind === 'colorPresence' && draft.colorPresence && (
-        <ColorPresenceForm opt={draft.colorPresence} onChange={(opt) => onChange({ ...draft, colorPresence: opt })} />
+      {draft.kind === 'text' && draft.text && (
+        <TextForm opt={draft.text} onChange={(opt) => onChange({ ...draft, text: opt })} />
       )}
-      {draft.kind === 'effect' && draft.effect && (
-        <EffectForm opt={draft.effect} onChange={(opt) => onChange({ ...draft, effect: opt })} />
-      )}
-      {draft.kind === 'featureMatch' && draft.featureMatch && (
-        <FeatureMatchForm opt={draft.featureMatch} templates={templates} onChange={(opt) => onChange({ ...draft, featureMatch: opt })} />
-      )}
-      {draft.kind === 'region' && draft.region && (
-        <RegionForm opt={draft.region} onChange={(opt) => onChange({ ...draft, region: opt })} />
+      {draft.kind === 'bar' && draft.bar && (
+        <BarForm opt={draft.bar} siblings={siblingDetections} onChange={(opt) => onChange({ ...draft, bar: opt })} />
       )}
 
       <OutputSection draft={draft} onChange={onChange} />
 
-      {/* Script-usage hint */}
+      {/* Script usage hint */}
       <div className="detection-section">
         <div className="detection-section__title">{t('detection.section.usage', 'Use in scripts')}</div>
-        <div className="detection-section__hint">
-          {t('detection.usage.hint', 'Scripts read this detection by name. Wire ctx / events yourself in your script:')}
-        </div>
-        <pre className="detection-script-hint">{`const r = detect.run('${draft.name || 'detection-name'}');\n// r.typedValue is shaped per output.type (boolean/number/text/bbox/bboxes/point)\n// r.found, r.match, r.value still available for raw access\nctx.set('${draft.name || 'value'}', r.typedValue);`}</pre>
+        <pre className="detection-script-hint">{`const r = detect.run('${draft.name || 'detection-name'}');\n// ${describeReturnShape(draft.kind)}`}</pre>
       </div>
     </>
   );
 };
 
-// ============= Output: type + stability =============
+function describeReturnShape(kind: DetectionKind): string {
+  switch (kind) {
+    case 'tracker': return 'r.match = current bbox {x,y,w,h,cx,cy} when tracker is locked';
+    case 'pattern': return 'r.match = projected bbox; r.confidence = match-ratio (0..1)';
+    case 'text':    return 'r.text = recognized string; r.confidence = OCR confidence (0..1)';
+    case 'bar':     return 'r.value = fill ratio (0..1); r.match = bar bbox; r.strip = sample band';
+  }
+}
 
-/** Output configuration: what shape `r.typedValue` takes + optional debounce. Replaces the
- *  old ctx/event/overlay UI (scripts handle those themselves now). */
+// ============================================================================
+//  Output: type + stability
+// ============================================================================
+
 const OutputSection: React.FC<{ draft: DetectionDefinition; onChange: (d: DetectionDefinition) => void }> = ({ draft, onChange }) => {
   const { t } = useTranslation();
   const out = draft.output ?? { eventOnChangeOnly: true };
   const setOutput = (patch: Partial<typeof out>) => onChange({ ...draft, output: { ...out, ...patch } });
 
-  // Default per-kind output type when user hasn't picked one.
-  const defaultType: Record<DetectionKind, 'boolean' | 'number' | 'bbox' | 'bboxes'> = {
-    template: 'bbox',
-    progressBar: 'number',
-    colorPresence: 'bboxes',
-    effect: 'boolean',
-    featureMatch: 'bbox',
-    region: 'bbox',
+  const defaultType: Record<DetectionKind, 'boolean' | 'number' | 'text' | 'bbox' | 'point'> = {
+    tracker: 'bbox',
+    pattern: 'bbox',
+    text: 'text',
+    bar: 'number',
   };
   const currentType = out.type ?? defaultType[draft.kind];
   const stab = out.stability ?? { minDurationMs: 0, tolerance: 0 };
@@ -191,20 +165,16 @@ const OutputSection: React.FC<{ draft: DetectionDefinition; onChange: (d: Detect
   return (
     <div className="detection-section">
       <div className="detection-section__title">{t('detection.section.output', 'Output')}</div>
-      <div className="detection-section__hint">
-        {t('detection.output.typeHint', 'Picks the shape returned by detect.run(name).typedValue.')}
-      </div>
       <div className="detection-field">
         <span className="detection-field__label">{t('detection.output.typeLabel', 'Output type')}</span>
         <CompactSelect
           value={currentType}
-          onChange={(v) => setOutput({ type: v as 'boolean' | 'number' | 'text' | 'bbox' | 'bboxes' | 'point' })}
+          onChange={(v) => setOutput({ type: v as typeof currentType })}
           options={[
             { value: 'boolean', label: t('detection.output.type.boolean', 'Boolean (found / not-found)') },
-            { value: 'number',  label: t('detection.output.type.number', 'Number (fill / count / confidence)') },
-            { value: 'text',    label: t('detection.output.type.text', 'Text (OCR / label)') },
-            { value: 'bbox',    label: t('detection.output.type.bbox', 'Bounding box (single)') },
-            { value: 'bboxes',  label: t('detection.output.type.bboxes', 'Bounding boxes (list)') },
+            { value: 'number',  label: t('detection.output.type.number', 'Number (fill / confidence)') },
+            { value: 'text',    label: t('detection.output.type.text', 'Text (OCR)') },
+            { value: 'bbox',    label: t('detection.output.type.bbox', 'Bounding box') },
             { value: 'point',   label: t('detection.output.type.point', 'Point (cx, cy)') },
           ]}
           style={{ width: '100%' }}
@@ -237,11 +207,15 @@ const OutputSection: React.FC<{ draft: DetectionDefinition; onChange: (d: Detect
   );
 };
 
-// ============= ROI section =============
+// ============================================================================
+//  ROI section (manual / anchored / linked)
+// ============================================================================
 
-const RoiSection: React.FC<{ draft: DetectionDefinition; siblings: DetectionDefinition[]; onChange: (d: DetectionDefinition) => void }> = ({
-  draft, siblings, onChange,
-}) => {
+const RoiSection: React.FC<{
+  draft: DetectionDefinition;
+  siblings: DetectionDefinition[];
+  onChange: (d: DetectionDefinition) => void;
+}> = ({ draft, siblings, onChange }) => {
   const { t } = useTranslation();
   const mode = roiMode(draft.roi);
 
@@ -265,7 +239,6 @@ const RoiSection: React.FC<{ draft: DetectionDefinition; siblings: DetectionDefi
           { value: 'linked', label: t('detection.roi.linked', 'Linked'), disabled: linkable.length === 0 },
         ]}
       />
-
       {mode === 'manual' && <RoiManual draft={draft} onChange={onChange} />}
       {mode === 'anchored' && <RoiAnchored draft={draft} onChange={onChange} />}
       {mode === 'linked' && <RoiLinked draft={draft} siblings={linkable} onChange={onChange} />}
@@ -279,8 +252,7 @@ const RoiManual: React.FC<{ draft: DetectionDefinition; onChange: (d: DetectionD
   const set = (k: 'x' | 'y' | 'w' | 'h', v: number) => onChange({ ...draft, roi: { ...roi, [k]: Math.max(0, v | 0) } });
   return (
     <>
-      <div className="detection-section__hint">{t('detection.roi.dragHint', 'Drag on the canvas to set, or type pixels:')}</div>
-      <div className="detection-row-2col">
+      <div className="detection-row-2col" style={{ marginTop: 4 }}>
         <CompactInput size="small" addonBefore="x" value={roi.x} onChange={(e) => set('x', Number(e.target.value))} />
         <CompactInput size="small" addonBefore="y" value={roi.y} onChange={(e) => set('y', Number(e.target.value))} />
       </div>
@@ -305,16 +277,11 @@ const RoiAnchored: React.FC<{ draft: DetectionDefinition; onChange: (d: Detectio
     <>
       <div className="detection-subtitle">{t('detection.roi.anchor', 'Anchor')}</div>
       <AnchorGridPicker value={roi.anchor ?? 'topLeft'} onChange={(a) => set({ anchor: a })} />
-      <div className="detection-section__hint">
-        {t('detection.roi.anchorHint', 'Coords are offsets from this corner. Right/bottom anchors take negative offsets to move inward.')}
-      </div>
-      <div className="detection-subtitle">{t('detection.roi.offset', 'Offset')}</div>
-      <div className="detection-row-2col">
+      <div className="detection-row-2col" style={{ marginTop: 4 }}>
         <CompactInput size="small" addonBefore="dx" value={roi.x} onChange={(e) => set({ x: Number(e.target.value) | 0 })} />
         <CompactInput size="small" addonBefore="dy" value={roi.y} onChange={(e) => set({ y: Number(e.target.value) | 0 })} />
       </div>
-      <div className="detection-subtitle">{t('detection.roi.size', 'Size')}</div>
-      <div className="detection-row-2col">
+      <div className="detection-row-2col" style={{ marginTop: 4 }}>
         <CompactInput size="small" addonBefore="w" value={roi.w} onChange={(e) => set({ w: Math.max(0, Number(e.target.value) | 0) })} />
         <CompactInput size="small" addonBefore="h" value={roi.h} onChange={(e) => set({ h: Math.max(0, Number(e.target.value) | 0) })} />
       </div>
@@ -322,9 +289,7 @@ const RoiAnchored: React.FC<{ draft: DetectionDefinition; onChange: (d: Detectio
   );
 };
 
-const RoiLinked: React.FC<{ draft: DetectionDefinition; siblings: DetectionDefinition[]; onChange: (d: DetectionDefinition) => void }> = ({
-  draft, siblings, onChange,
-}) => {
+const RoiLinked: React.FC<{ draft: DetectionDefinition; siblings: DetectionDefinition[]; onChange: (d: DetectionDefinition) => void }> = ({ draft, siblings, onChange }) => {
   const { t } = useTranslation();
   const roi = draft.roi ?? { x: 0, y: 0, w: 0, h: 0, fromDetectionId: siblings[0]?.id };
   const set = (patch: Partial<DetectionRoi>) => onChange({ ...draft, roi: { ...roi, ...patch } });
@@ -339,9 +304,6 @@ const RoiLinked: React.FC<{ draft: DetectionDefinition; siblings: DetectionDefin
           style={{ width: '100%' }}
         />
       </div>
-      <div className="detection-section__hint">
-        {t('detection.roi.linkedHint', 'Uses the parent\'s match bbox as this ROI. Inset margins shrink it inward.')}
-      </div>
       <div className="detection-subtitle">{t('detection.roi.insets', 'Inset margins (px)')}</div>
       <div className="detection-row-2col">
         <CompactInput size="small" addonBefore="L" value={roi.x} onChange={(e) => set({ x: Math.max(0, Number(e.target.value) | 0) })} />
@@ -355,396 +317,246 @@ const RoiLinked: React.FC<{ draft: DetectionDefinition; siblings: DetectionDefin
   );
 };
 
-// ============= 3×3 anchor grid picker =============
-
-const AnchorGridPicker: React.FC<{ value: AnchorOrigin; onChange: (a: AnchorOrigin) => void }> = ({ value, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="anchor-grid">
-      {ANCHOR_ORIGINS.map((a) => (
-        <Tooltip key={a} title={t(`detection.anchor.${a}`, a)}>
-          <div
-            className={classNames('anchor-grid__cell', { 'anchor-grid__cell--active': value === a })}
-            onClick={() => onChange(a)}
-          >
-            ●
-          </div>
-        </Tooltip>
-      ))}
-    </div>
-  );
-};
-
-// ============= Per-kind sub-forms =============
-
-const TemplateForm: React.FC<{ opt: TemplateOptions; templates: TemplateInfo[]; onChange: (o: TemplateOptions) => void }> = ({
-  opt, templates, onChange,
-}) => {
-  const { t } = useTranslation();
-  return (
-    <div className="detection-section">
-      <div className="detection-section__title">{t('detection.section.template', 'Template options')}</div>
-      <TemplatePickerField
-        value={opt.templateName}
-        templates={templates}
-        onChange={(v) => onChange({ ...opt, templateName: v })}
+const AnchorGridPicker: React.FC<{ value: AnchorOrigin; onChange: (a: AnchorOrigin) => void }> = ({ value, onChange }) => (
+  <div className="detection-anchor-grid">
+    {ANCHOR_ORIGINS.map((a) => (
+      <button
+        key={a}
+        className={classNames('detection-anchor-grid__cell', { 'detection-anchor-grid__cell--active': a === value })}
+        onClick={() => onChange(a)}
+        title={a}
+        type="button"
       />
-      <ConfidenceSlider value={opt.minConfidence} onChange={(v) => onChange({ ...opt, minConfidence: v })} />
-      <ScaleSlider value={opt.scale} onChange={(v) => onChange({ ...opt, scale: v })} />
-      <MatchModeSegmented edge={opt.edge} grayscale={opt.grayscale}
-        onChange={(g, e) => onChange({ ...opt, grayscale: g, edge: e })} />
-      <div className="detection-field">
-        <label className="detection-inline-label">
-          <input type="checkbox" checked={opt.pyramid} onChange={(e) => onChange({ ...opt, pyramid: e.target.checked })} />
-          {t('detection.field.pyramid', 'Pyramid coarse-to-fine (~5× faster)')}
-        </label>
-      </div>
-    </div>
-  );
-};
+    ))}
+  </div>
+);
 
-const ProgressBarForm: React.FC<{ opt: ProgressBarOptions; templates: TemplateInfo[]; onChange: (o: ProgressBarOptions) => void }> = ({
-  opt, templates, onChange,
-}) => {
+// ============================================================================
+//  Per-kind editor forms
+// ============================================================================
+
+const TrackerForm: React.FC<{ opt: TrackerOptions; onChange: (o: TrackerOptions) => void }> = ({ opt, onChange }) => {
   const { t } = useTranslation();
+  const algoLabels: Record<TrackerAlgorithm, string> = {
+    kcf: t('detection.tracker.algo.kcf', 'KCF — fast (~150 fps), default') as string,
+    csrt: t('detection.tracker.algo.csrt', 'CSRT — slow (~25 fps), most accurate') as string,
+    mil: t('detection.tracker.algo.mil', 'MIL — robust to occlusions') as string,
+  };
   return (
     <div className="detection-section">
-      <div className="detection-section__title">{t('detection.section.bar', 'Progress bar options')}</div>
-
-      <div className="detection-subtitle">{t('detection.bar.bbox', 'Bar bbox')}</div>
+      <div className="detection-section__title">{t('detection.section.tracker', 'Tracker (moving element)')}</div>
       <div className="detection-section__hint">
-        {t('detection.bar.bboxHint', 'Either select a template that frames the bar, or leave the template blank and use the ROI section above to anchor / link the bbox.')}
+        {t('detection.tracker.hint', 'OpenCV visual tracker. Initialized once on a chosen frame + bbox; subsequent runs follow the element. Re-train to change the init frame.')}
       </div>
-      <TemplatePickerField
-        value={opt.templateName}
-        templates={templates}
-        onChange={(v) => onChange({ ...opt, templateName: v })}
-        allowEmpty
-      />
-      {opt.templateName && (
-        <>
-          <ConfidenceSlider value={opt.minConfidence} onChange={(v) => onChange({ ...opt, minConfidence: v })} />
-          <ScaleSlider value={opt.scale} onChange={(v) => onChange({ ...opt, scale: v })} />
-          <MatchModeSegmented edge={opt.templateEdge} grayscale={opt.grayscale}
-            onChange={(g, e) => onChange({ ...opt, grayscale: g, templateEdge: e })} />
-          <div className="detection-field">
-            <label className="detection-inline-label">
-              <input type="checkbox" checked={opt.pyramid} onChange={(e) => onChange({ ...opt, pyramid: e.target.checked })} />
-              {t('detection.field.pyramid', 'Pyramid coarse-to-fine (~5× faster)')}
-            </label>
-          </div>
-        </>
-      )}
-
-      <div className="detection-subtitle">{t('detection.bar.fill', 'Fill measurement')}</div>
-      <ColorRow label={t('detection.field.fillColor', 'Fill color')} color={opt.fillColor}
-        onChange={(c) => onChange({ ...opt, fillColor: c })} />
-      <ColorSpaceRow value={opt.colorSpace} onChange={(cs) => onChange({ ...opt, colorSpace: cs })} />
-      <ToleranceSlider value={opt.tolerance} colorSpace={opt.colorSpace}
-        onChange={(v) => onChange({ ...opt, tolerance: v })} />
       <div className="detection-field">
-        <span className="detection-field__label">{t('detection.field.direction', 'Fill direction')}</span>
-        <FillDirectionPicker value={opt.direction} onChange={(d) => onChange({ ...opt, direction: d })} />
+        <span className="detection-field__label">{t('detection.tracker.algo', 'Algorithm')}</span>
+        <CompactSelect
+          value={opt.algorithm}
+          onChange={(v) => onChange({ ...opt, algorithm: v as TrackerAlgorithm })}
+          options={(['kcf', 'csrt', 'mil'] as TrackerAlgorithm[]).map((a) => ({ value: a, label: algoLabels[a] }))}
+          style={{ width: '100%' }}
+        />
       </div>
       <div className="detection-field">
         <span className="detection-field__label">
-          {t('detection.field.lineThreshold', 'Line fill threshold')}: {(opt.lineThreshold * 100).toFixed(0)}%
+          {t('detection.tracker.initBbox', 'Init bbox')}: ({opt.initX}, {opt.initY}) {opt.initW}×{opt.initH}
         </span>
-        <Slider min={0.1} max={0.95} step={0.05} value={opt.lineThreshold}
-          onChange={(v) => onChange({ ...opt, lineThreshold: v })} />
-        <div className="detection-section__hint">
-          {t('detection.field.lineThresholdHint', 'Fraction of pixels per orthogonal line that must match the fill color for that line to count as filled.')}
-        </div>
       </div>
-      <div className="detection-row-2col">
-        <div className="detection-field">
-          <span className="detection-field__label">
-            {t('detection.field.insetLeft', 'Inset start %')}: {(opt.insetLeftPct * 100).toFixed(0)}
-          </span>
-          <Slider min={0} max={0.5} step={0.02} value={opt.insetLeftPct}
-            onChange={(v) => onChange({ ...opt, insetLeftPct: v })} />
-        </div>
-        <div className="detection-field">
-          <span className="detection-field__label">
-            {t('detection.field.insetRight', 'Inset end %')}: {(opt.insetRightPct * 100).toFixed(0)}
-          </span>
-          <Slider min={0} max={0.5} step={0.02} value={opt.insetRightPct}
-            onChange={(v) => onChange({ ...opt, insetRightPct: v })} />
-        </div>
+      <div className="detection-field">
+        <span className="detection-field__label">{t('detection.tracker.reacquire', 'Re-acquire on lost')}</span>
+        <CompactSwitch checked={opt.reacquireOnLost} onChange={(c) => onChange({ ...opt, reacquireOnLost: c })} />
       </div>
     </div>
   );
 };
 
-const ColorPresenceForm: React.FC<{ opt: ColorPresenceOptions; onChange: (o: ColorPresenceOptions) => void }> = ({ opt, onChange }) => {
+const PatternForm: React.FC<{ opt: PatternOptions; onChange: (o: PatternOptions) => void }> = ({ opt, onChange }) => {
   const { t } = useTranslation();
   return (
     <div className="detection-section">
-      <div className="detection-section__title">{t('detection.section.colorPresence', 'Color presence options')}</div>
-      <ColorRow label={t('detection.field.targetColor', 'Target color')} color={opt.color}
-        onChange={(c) => onChange({ ...opt, color: c })} />
-      <ColorSpaceRow value={opt.colorSpace} onChange={(cs) => onChange({ ...opt, colorSpace: cs })} />
-      <ToleranceSlider value={opt.tolerance} colorSpace={opt.colorSpace}
-        onChange={(v) => onChange({ ...opt, tolerance: v })} />
-      <div className="detection-field">
-        <span className="detection-field__label">{t('detection.field.minArea', 'Min blob area (px²)')}: {opt.minArea}</span>
-        <Slider min={1} max={5000} step={10} value={opt.minArea}
-          onChange={(v) => onChange({ ...opt, minArea: v })} />
+      <div className="detection-section__title">{t('detection.section.pattern', 'Pattern (ORB descriptors)')}</div>
+      <div className="detection-section__hint">
+        {t('detection.pattern.hint', 'Background-invariant feature match. Trainer extracts ORB keypoints from positive samples; runtime matches them in the current frame. Re-train to refresh the model.')}
       </div>
-      <div className="detection-field">
-        <span className="detection-field__label">{t('detection.field.maxResults', 'Max results')}: {opt.maxResults}</span>
-        <Slider min={1} max={64} step={1} value={opt.maxResults}
-          onChange={(v) => onChange({ ...opt, maxResults: v })} />
-      </div>
-    </div>
-  );
-};
-
-const EffectForm: React.FC<{ opt: EffectOptions; onChange: (o: EffectOptions) => void }> = ({ opt, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="detection-section">
-      <div className="detection-section__title">{t('detection.section.effect', 'Visual effect options')}</div>
       <div className="detection-field">
         <span className="detection-field__label">
-          {t('detection.field.threshold', 'Trigger threshold')}: {opt.threshold.toFixed(2)}
+          {t('detection.pattern.modelInfo', 'Model')}: {opt.keypointCount} keypoints, {opt.templateWidth}×{opt.templateHeight}
         </span>
-        <Slider min={0.01} max={1.0} step={0.01} value={opt.threshold}
-          onChange={(v) => onChange({ ...opt, threshold: v })} />
       </div>
       <div className="detection-field">
-        <label className="detection-inline-label">
-          <input type="checkbox" checked={opt.autoBaseline}
-            onChange={(e) => onChange({ ...opt, autoBaseline: e.target.checked })} />
-          {t('detection.field.autoBaseline', 'Auto-snapshot baseline on first frame')}
-        </label>
+        <span className="detection-field__label">{t('detection.pattern.minConfidence', 'Min confidence')}: {opt.minConfidence.toFixed(2)}</span>
+        <Slider min={0.05} max={1.0} step={0.01} value={opt.minConfidence}
+          onChange={(v) => onChange({ ...opt, minConfidence: v })} />
       </div>
       <div className="detection-field">
-        <label className="detection-inline-label">
-          <input type="checkbox" checked={opt.edge}
-            onChange={(e) => onChange({ ...opt, edge: e.target.checked })} />
-          {t('detection.field.edgeDiff', 'Edge diff (ignores color/lighting drift, only flags shape changes)')}
-        </label>
+        <span className="detection-field__label">{t('detection.pattern.lowe', 'Lowe ratio')}: {opt.loweRatio.toFixed(2)}</span>
+        <Slider min={0.5} max={0.9} step={0.01} value={opt.loweRatio}
+          onChange={(v) => onChange({ ...opt, loweRatio: v })} />
+      </div>
+      <div className="detection-field">
+        <span className="detection-field__label">{t('detection.pattern.maxKp', 'Max runtime keypoints')}: {opt.maxRuntimeKeypoints}</span>
+        <Slider min={100} max={2000} step={50} value={opt.maxRuntimeKeypoints}
+          onChange={(v) => onChange({ ...opt, maxRuntimeKeypoints: v })} />
       </div>
     </div>
   );
 };
 
-const FeatureMatchForm: React.FC<{ opt: FeatureMatchOptions; templates: TemplateInfo[]; onChange: (o: FeatureMatchOptions) => void }> = ({
-  opt, templates, onChange,
-}) => {
+const TextForm: React.FC<{ opt: TextOptions; onChange: (o: TextOptions) => void }> = ({ opt, onChange }) => {
   const { t } = useTranslation();
   return (
     <div className="detection-section">
-      <div className="detection-section__title">{t('detection.section.feature', 'Feature match (scale-invariant)')}</div>
-      <TemplatePickerField value={opt.templateName} templates={templates}
-        onChange={(v) => onChange({ ...opt, templateName: v })} />
-      <ConfidenceSlider value={opt.minConfidence} onChange={(v) => onChange({ ...opt, minConfidence: v })} />
-      <MatchModeSegmented edge={opt.edge} grayscale={opt.grayscale}
-        onChange={(g, e) => onChange({ ...opt, grayscale: g, edge: e })} />
+      <div className="detection-section__title">{t('detection.section.text', 'Text (OCR)')}</div>
+      <div className="detection-section__hint">
+        {t('detection.text.hint', 'Tesseract OCR. ROI defines what region to read. Tip: pre-binarize + upscale 2× for small game UI text.')}
+      </div>
       <div className="detection-row-2col">
         <div className="detection-field">
-          <span className="detection-field__label">{t('detection.field.scaleMin', 'Scale min')}: {opt.scaleMin.toFixed(2)}</span>
-          <Slider min={0.25} max={1.0} step={0.05} value={opt.scaleMin}
-            onChange={(v) => onChange({ ...opt, scaleMin: v })} />
+          <span className="detection-field__label">{t('detection.text.lang', 'Language')}</span>
+          <CompactSelect
+            value={opt.language}
+            onChange={(v) => onChange({ ...opt, language: v as string })}
+            options={[
+              { value: 'eng', label: 'English (eng)' },
+              { value: 'chi_sim', label: 'Chinese Simplified (chi_sim)' },
+              { value: 'chi_tra', label: 'Chinese Traditional (chi_tra)' },
+              { value: 'jpn', label: 'Japanese (jpn)' },
+              { value: 'kor', label: 'Korean (kor)' },
+            ]}
+            style={{ width: '100%' }}
+          />
         </div>
         <div className="detection-field">
-          <span className="detection-field__label">{t('detection.field.scaleMax', 'Scale max')}: {opt.scaleMax.toFixed(2)}</span>
-          <Slider min={1.0} max={2.0} step={0.05} value={opt.scaleMax}
-            onChange={(v) => onChange({ ...opt, scaleMax: v })} />
+          <span className="detection-field__label">{t('detection.text.psm', 'Page seg mode')}</span>
+          <CompactSelect
+            value={opt.pageSegMode}
+            onChange={(v) => onChange({ ...opt, pageSegMode: v as number })}
+            options={[
+              { value: 6, label: '6 — uniform block' },
+              { value: 7, label: '7 — single line' },
+              { value: 8, label: '8 — single word' },
+              { value: 13, label: '13 — raw line, no layout' },
+            ]}
+            style={{ width: '100%' }}
+          />
         </div>
       </div>
       <div className="detection-field">
-        <span className="detection-field__label">{t('detection.field.scaleSteps', 'Scale steps')}: {opt.scaleSteps}</span>
-        <Slider min={1} max={9} step={1} value={opt.scaleSteps}
-          onChange={(v) => onChange({ ...opt, scaleSteps: v })} />
-      </div>
-    </div>
-  );
-};
-
-const RegionForm: React.FC<{ opt: RegionOptions; onChange: (o: RegionOptions) => void }> = ({ opt, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="detection-section">
-      <div className="detection-section__title">{t('detection.section.region', 'Region (anchor)')}</div>
-      <div className="detection-section__hint">
-        {t('detection.region.hint', 'Region kind has no detection logic — its result IS the resolved ROI. Other detections can reference this one via the Linked ROI source.')}
-      </div>
-      <div className="detection-field" style={{ marginTop: 8 }}>
-        <span className="detection-field__label">{t('detection.region.note', 'Note (optional)')}</span>
+        <span className="detection-field__label">{t('detection.text.regex', 'Match regex (optional)')}</span>
         <CompactInput
-          value={opt.note ?? ''}
-          placeholder={t('detection.region.notePlaceholder', 'Top-right HUD area, etc.') as string}
-          onChange={(e) => onChange({ ...opt, note: e.target.value || undefined })}
+          value={opt.matchRegex ?? ''}
+          placeholder={t('detection.text.regexPlaceholder', 'e.g. ^HP:\\s*\\d+/\\d+$') as string}
+          onChange={(e) => onChange({ ...opt, matchRegex: e.target.value || undefined })}
         />
+      </div>
+      <div className="detection-row-2col">
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.text.binarize', 'Binarize')}</span>
+          <CompactSwitch checked={opt.binarize} onChange={(c) => onChange({ ...opt, binarize: c })} />
+        </div>
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.text.upscale', 'Upscale')}: {opt.upscaleFactor.toFixed(1)}×</span>
+          <Slider min={1.0} max={4.0} step={0.5} value={opt.upscaleFactor}
+            onChange={(v) => onChange({ ...opt, upscaleFactor: v })} />
+        </div>
+      </div>
+      <div className="detection-field">
+        <span className="detection-field__label">{t('detection.text.minConfidence', 'Min confidence (0..100)')}: {opt.minConfidence}</span>
+        <Slider min={0} max={100} step={5} value={opt.minConfidence}
+          onChange={(v) => onChange({ ...opt, minConfidence: v })} />
       </div>
     </div>
   );
 };
 
-// Output bindings UI removed — scripts call detect.run('name') and decide what to do with
-// the result. Existing detections that have ctx / event / overlay bindings still work at
-// runtime (StdLib detect.run honors def.output) but new detections leave them empty.
-
-// ============= Shared widgets =============
-
-const TemplatePickerField: React.FC<{
-  value: string; templates: TemplateInfo[]; onChange: (v: string) => void; allowEmpty?: boolean;
-}> = ({ value, templates, onChange, allowEmpty }) => {
+const BarForm: React.FC<{ opt: BarOptions; siblings: DetectionDefinition[]; onChange: (o: BarOptions) => void }> = ({ opt, siblings, onChange }) => {
   const { t } = useTranslation();
-  const opts: { value: string; label: string }[] = templates.map((tpl) => ({
-    value: tpl.id,
-    label: tpl.description ? `${tpl.name} — ${tpl.description}` : tpl.name,
-  }));
-  if (allowEmpty) opts.unshift({ value: '', label: t('detection.template.none', '— No template (use ROI directly) —') });
+  const setColor = (c: AntColor | string) => {
+    const rgb = typeof c === 'string' ? hexToRgb(c) : { r: c.toRgb().r, g: c.toRgb().g, b: c.toRgb().b };
+    onChange({ ...opt, fillColor: rgb });
+  };
+  const patterns = siblings.filter((s) => s.kind === 'pattern' && s.id);
   return (
-    <div className="detection-field">
-      <span className="detection-field__label">{t('detection.field.template', 'Template')}</span>
-      <CompactSelect
-        value={value || (allowEmpty ? '' : undefined)}
-        onChange={(v) => onChange(v ?? '')}
-        options={opts}
-        placeholder={t('detection.field.template.placeholder', 'Pick a saved template')}
-        style={{ width: '100%' }}
-        disabled={templates.length === 0 && !allowEmpty}
-      />
-    </div>
-  );
-};
-
-const ConfidenceSlider: React.FC<{ value: number; onChange: (v: number) => void }> = ({ value, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="detection-field">
-      <span className="detection-field__label">{t('detection.field.minConfidence', 'Min confidence')}: {value.toFixed(2)}</span>
-      <Slider min={0.5} max={0.99} step={0.01} value={value} onChange={onChange} />
-    </div>
-  );
-};
-
-const ScaleSlider: React.FC<{ value: number; onChange: (v: number) => void }> = ({ value, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="detection-field">
-      <span className="detection-field__label">{t('detection.field.scale', 'Scale')}: {value.toFixed(2)}</span>
-      <Slider min={0.25} max={1.0} step={0.05} value={value} onChange={onChange} />
-    </div>
-  );
-};
-
-const MatchModeSegmented: React.FC<{
-  edge: boolean; grayscale: boolean; onChange: (grayscale: boolean, edge: boolean) => void;
-}> = ({ edge, grayscale, onChange }) => {
-  const { t } = useTranslation();
-  const mode = edge ? 'edge' : grayscale ? 'grayscale' : 'color';
-  return (
-    <div className="detection-field">
-      <span className="detection-field__label">{t('detection.field.matchMode', 'Match mode')}</span>
-      <CompactSegmented
-        value={mode}
-        onChange={(v) => {
-          const m = v as 'color' | 'grayscale' | 'edge';
-          onChange(m !== 'color', m === 'edge');
-        }}
-        options={[
-          { value: 'color', label: t('detection.matchMode.color', 'Color') },
-          { value: 'grayscale', label: t('detection.matchMode.grayscale', 'Grayscale') },
-          { value: 'edge', label: t('detection.matchMode.edge', 'Edge / Shape') },
-        ]}
-      />
+    <div className="detection-section">
+      <div className="detection-section__title">{t('detection.section.bar', 'Bar (HP / MP / cooldown)')}</div>
       <div className="detection-section__hint">
-        {edge
-          ? t('detection.matchMode.edgeHint', 'Compares Canny edges only — survives color drift, lighting, variable fill.')
-          : grayscale
-            ? t('detection.matchMode.grayscaleHint', '~3× faster than color; some accuracy loss on color-discriminated UI.')
-            : t('detection.matchMode.colorHint', 'Strict pixel match — fastest but breakable by color/light shifts.')}
+        {t('detection.bar.hint', 'Bar locator: anchor on a Pattern detection or use ROI directly. Then samples a strip in the fill direction to compute fill ratio.')}
       </div>
-    </div>
-  );
-};
-
-const ToleranceSlider: React.FC<{ value: number; colorSpace: ColorSpace; onChange: (v: number) => void }> = ({ value, colorSpace, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="detection-field">
-      <span className="detection-field__label">
-        {colorSpace === 'hsv' ? t('detection.field.hueTolerance', 'Hue tolerance (°)') : t('detection.field.tolerance', 'Tolerance')}: ±{value}
-      </span>
-      <Slider min={0} max={colorSpace === 'hsv' ? 90 : 120} step={1} value={value} onChange={onChange} />
-    </div>
-  );
-};
-
-const FillDirectionPicker: React.FC<{ value: FillDirection; onChange: (d: FillDirection) => void }> = ({ value, onChange }) => {
-  // 3×3 grid: top is up arrow, left is left arrow, etc. Center cell shows current selection.
-  const { t } = useTranslation();
-  const cell = (label: string, dir: FillDirection | undefined, sym: string) => (
-    <Tooltip title={dir ? t(`detection.direction.${dir}`, label) : ''}>
-      <div
-        className={classNames('fill-direction__cell', {
-          'fill-direction__cell--filler': !dir,
-          'fill-direction__cell--active': dir && value === dir,
-        })}
-        onClick={() => dir && onChange(dir)}
-      >
-        {sym}
-      </div>
-    </Tooltip>
-  );
-  return (
-    <div className="fill-direction">
-      {cell('', undefined, '')}
-      {cell('top to bottom', 'topToBottom', '↓')}
-      {cell('', undefined, '')}
-      {cell('left to right', 'leftToRight', '→')}
-      {cell('', undefined, '·')}
-      {cell('right to left', 'rightToLeft', '←')}
-      {cell('', undefined, '')}
-      {cell('bottom to top', 'bottomToTop', '↑')}
-      {cell('', undefined, '')}
-    </div>
-  );
-};
-
-const ColorRow: React.FC<{ label: string; color: RgbColor; onChange: (c: RgbColor) => void }> = ({ label, color, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="detection-field">
-      <span className="detection-field__label">{label}</span>
-      <div className="detection-color-row">
-        <ColorPicker
-          size="small"
-          value={`rgb(${color.r}, ${color.g}, ${color.b})`}
-          format="rgb"
-          showText
-          disabledAlpha
-          onChange={(c: AntColor) => {
-            const rgb = c.toRgb();
-            onChange({ r: rgb.r, g: rgb.g, b: rgb.b });
-          }}
+      <div className="detection-field">
+        <span className="detection-field__label">{t('detection.bar.anchor', 'Anchor pattern (optional)')}</span>
+        <CompactSelect
+          value={opt.anchorPatternId ?? ''}
+          onChange={(v) => onChange({ ...opt, anchorPatternId: (v as string) || undefined })}
+          options={[{ value: '', label: t('detection.bar.useRoi', '— None (use ROI directly) —') as string },
+            ...patterns.map((p) => ({ value: p.id, label: p.name || p.id }))]}
+          style={{ width: '100%' }}
         />
-        <span className="detection-color-row__hint">
-          {t('detection.field.color.altClickHint', 'alt+click canvas to pick')}
-        </span>
+      </div>
+      <div className="detection-row-2col">
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.bar.fillColor', 'Fill color')}</span>
+          <ColorPicker value={rgbToHex(opt.fillColor)} onChange={(c) => setColor(c)} showText />
+        </div>
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.bar.tolerance', 'Tolerance')}: ±{opt.tolerance}</span>
+          <Slider min={5} max={120} step={5} value={opt.tolerance}
+            onChange={(v) => onChange({ ...opt, tolerance: v })} />
+        </div>
+      </div>
+      <div className="detection-row-2col">
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.bar.colorSpace', 'Color space')}</span>
+          <CompactSegmented
+            value={opt.colorSpace}
+            onChange={(v) => onChange({ ...opt, colorSpace: v as ColorSpace })}
+            options={[{ value: 'rgb', label: 'RGB' }, { value: 'hsv', label: 'HSV' }]}
+          />
+        </div>
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.bar.direction', 'Fill direction')}</span>
+          <CompactSelect
+            value={opt.direction}
+            onChange={(v) => onChange({ ...opt, direction: v as FillDirection })}
+            options={[
+              { value: 'leftToRight', label: '→ Left to Right' },
+              { value: 'rightToLeft', label: '← Right to Left' },
+              { value: 'topToBottom', label: '↓ Top to Bottom' },
+              { value: 'bottomToTop', label: '↑ Bottom to Top' },
+            ]}
+            style={{ width: '100%' }}
+          />
+        </div>
+      </div>
+      <div className="detection-field">
+        <span className="detection-field__label">{t('detection.bar.lineThreshold', 'Line threshold')}: {opt.lineThreshold.toFixed(2)}</span>
+        <Slider min={0.10} max={0.95} step={0.05} value={opt.lineThreshold}
+          onChange={(v) => onChange({ ...opt, lineThreshold: v })} />
+      </div>
+      <div className="detection-row-2col">
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.bar.insetLeft', 'Inset (empty side) %')}: {(opt.insetLeftPct * 100).toFixed(0)}%</span>
+          <Slider min={0} max={50} step={1} value={Math.round(opt.insetLeftPct * 100)}
+            onChange={(v) => onChange({ ...opt, insetLeftPct: v / 100 })} />
+        </div>
+        <div className="detection-field">
+          <span className="detection-field__label">{t('detection.bar.insetRight', 'Inset (full side) %')}: {(opt.insetRightPct * 100).toFixed(0)}%</span>
+          <Slider min={0} max={50} step={1} value={Math.round(opt.insetRightPct * 100)}
+            onChange={(v) => onChange({ ...opt, insetRightPct: v / 100 })} />
+        </div>
       </div>
     </div>
   );
 };
 
-const ColorSpaceRow: React.FC<{ value: ColorSpace; onChange: (cs: ColorSpace) => void }> = ({ value, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="detection-field">
-      <span className="detection-field__label">{t('detection.field.colorSpace', 'Color space')}</span>
-      <CompactSegmented
-        value={value}
-        onChange={(v) => onChange(v as ColorSpace)}
-        options={[
-          { value: 'rgb', label: t('detection.colorSpace.rgb', 'RGB (exact)') },
-          { value: 'hsv', label: t('detection.colorSpace.hsv', 'HSV (lighting-tolerant)') },
-        ]}
-      />
-    </div>
-  );
-};
+// ============================================================================
+//  Helpers
+// ============================================================================
+
+function rgbToHex(c: RgbColor): string {
+  const h = (n: number) => n.toString(16).padStart(2, '0');
+  return `#${h(c.r)}${h(c.g)}${h(c.b)}`;
+}
+function hexToRgb(hex: string): RgbColor {
+  const s = hex.startsWith('#') ? hex.slice(1) : hex;
+  return { r: parseInt(s.slice(0, 2), 16), g: parseInt(s.slice(2, 4), 16), b: parseInt(s.slice(4, 6), 16) };
+}

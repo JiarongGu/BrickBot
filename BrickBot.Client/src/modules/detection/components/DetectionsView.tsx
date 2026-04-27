@@ -72,7 +72,7 @@ export const DetectionsView: React.FC = () => {
   };
 
   const onAddManual = () => {
-    setDraft(newDetection('progressBar'));
+    setDraft(newDetection('pattern'));
     setEditorOpen(true);
   };
 

@@ -74,10 +74,30 @@ For authoring template PNGs that scripts reference via `vision.find('name.png')`
 
 ## Vision
 
-- **Library**: OpenCvSharp4 (managed wrapper over OpenCV).
-- **Operations**: template matching (multi-scale optional), color thresholding, color-at-point, edge detection (later).
-- All vision ops accept an optional ROI (region of interest) to keep latency low for action-game use.
-- Templates are stored per-profile in `data/<profile>/templates/` (PNG).
+- **Library**: OpenCvSharp4 4.13 (managed wrapper over OpenCV) + `OpenCvSharp.Tracking` namespace (KCF / CSRT / MIL trackers — main package, no contrib).
+- **OCR**: Tesseract via `Tesseract` NuGet package (pending; `VisionService.OcrRoi` is a stub returning empty until the package is added).
+- **Operations**: ORB descriptor extraction + matching (`ExtractDescriptors`, `MatchPattern`), color-at-point, `PercentBar` / `LinearFillRatio` (bar fill scan), stateful visual trackers, OCR ROI.
+- All vision ops accept an optional ROI to keep latency low for action-game use.
+
+### Locked-in detection kinds (v2 rewrite)
+
+Only **four** kinds — everything else (`template`, `progressBar`, `colorPresence`, `effect`, `region`, `featureMatch`) was deleted:
+
+| Kind | Approach | Use case |
+|---|---|---|
+| `tracker` | OpenCV KCF / CSRT / MIL — stateful frame-to-frame tracking | Moving element / character location |
+| `pattern` | ORB keypoint + descriptor match (BFMatcher + Lowe ratio + RANSAC localization) | Static element appearance, background-invariant |
+| `text` | Tesseract OCR with optional binarize + upscale | Buff names, status banners, quest text |
+| `bar` | `LinearFillRatio` along inferred direction | HP / MP / cooldown meters |
+
+Trained-detection models live INSIDE the detection definition's options block:
+- `pattern.descriptors` — base64 ORB descriptor blob (rows × 32 bytes).
+- `pattern.embeddedPng` — cropped reference patch (re-training + overlay).
+- `tracker.initFramePng` — full frame the tracker was initialized on.
+- `text` — language + page-seg + regex; no embedded data.
+- `bar` — fill color + direction + line threshold derived by the trainer.
+
+No external Templates-table dependency. `data/<profile>/templates/` is unused for new detections.
 
 ## Input
 

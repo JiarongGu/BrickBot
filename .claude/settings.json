@@ -36,7 +36,8 @@
       "Bash(echo \"---exit $?\")",
       "Bash(echo \"---tsc $?\")",
       "Bash(echo \"exit=$?\")",
-      "Bash(tasklist)"
+      "Bash(tasklist)",
+      "Bash(git status *)"
     ],
     "additionalDirectories": [
       ".claude",

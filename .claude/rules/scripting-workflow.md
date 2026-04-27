@@ -11,17 +11,23 @@ don't put orchestration in libraries).
 **Author:** Training wizard (`DetectionsView` tab → "Train new"). 5-step wizard captures samples,
 labels them, derives config, saves a `DetectionDefinition` + linked training samples.
 
-**Five kinds**:
+**Four kinds** (locked in by the v2 rewrite — `template`, `colorPresence`, `effect`, `region`,
+`featureMatch` were all deleted):
 | Kind | Output | When to use |
 |---|---|---|
-| `template` | bbox + confidence | Static UI element — buff icon, button, alert |
-| `progressBar` | 0..1 fill ratio | HP / MP / cooldown bar |
-| `colorPresence` | blob count + bboxes | Loot drops, glowing enemies, marked tiles |
-| `effect` | bool (triggered) + diff | Flash / animation / buff appearing |
-| `featureMatch` | bbox + confidence | Sprite at variable scales (UI scales differ across resolutions) |
-| `region` | resolved ROI (no detection) | Reusable anchored rectangle other detections compose on |
+| `tracker` | bbox + cx/cy (live) | **Moving element / character.** OpenCV KCF / CSRT / MIL — initialized once with a frame + drag-bbox, then follows motion. ~150 fps (KCF) / ~25 fps (CSRT). |
+| `pattern` | bbox + confidence | **Element appearance.** ORB descriptor match — background-invariant. Replaces the old template + featureMatch kinds. Trainer extracts ORB keypoints from positives + tunes match threshold against negatives. |
+| `text` | text string + confidence | **OCR.** Tesseract via `OpenCvSharp.Dnn` integration (NuGet pending). One-shot training: drag bbox + pick language. |
+| `bar` | 0..1 fill ratio | **HP / MP / cooldown meter.** Renamed from the old `progressBar`. Trainer infers fill color, direction, and line threshold from labeled fills. |
 
-**Read from scripts:** `const r = detect.run('hp-bar')` → `{ value, found, match, triggered, blobs, confidence }`.
+**Read from scripts:** `const r = detect.run('hp-bar')` → `{ value, match, text, confidence, found, durationMs }`.
+
+The four-kind matrix matches the user-facing categories in the training UI:
+1. Track moving element → `tracker`
+2. Detect element presence → `pattern`
+3. Track character → `tracker`
+4. OCR text → `text`
+5. Read meter → `bar`
 
 ## Layer 2 — Library scripts (`library/*.js`)
 

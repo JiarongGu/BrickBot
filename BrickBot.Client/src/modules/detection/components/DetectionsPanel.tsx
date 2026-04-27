@@ -199,12 +199,10 @@ export const DetectionsPanel: React.FC = () => {
       // alt+click → pick color into the active kind's color field.
       const c = sampleColor(p.x, p.y);
       if (!c) return;
-      if (draft.kind === 'colorPresence' && draft.colorPresence) {
-        setDraft({ ...draft, colorPresence: { ...draft.colorPresence, color: c } });
-      } else if (draft.kind === 'progressBar' && draft.progressBar) {
-        setDraft({ ...draft, progressBar: { ...draft.progressBar, fillColor: c } });
+      if (draft.kind === 'bar' && draft.bar) {
+        setDraft({ ...draft, bar: { ...draft.bar, fillColor: c } });
       } else {
-        message.info(t('detection.colorPickWrongKind', 'Color pick only applies to Color Presence / Progress Bar kinds.'));
+        message.info(t('detection.colorPickWrongKind', 'Color pick only applies to Bar kind.'));
         return;
       }
       message.success(t('detection.colorPicked', 'Picked rgb({{r}}, {{g}}, {{b}})', { r: c.r, g: c.g, b: c.b }));
@@ -373,17 +371,15 @@ export const DetectionsPanel: React.FC = () => {
             <span>{t('detection.editor.title', 'Editor')}</span>
             {draft && (
               <CompactSpace size={4}>
-                {draft.kind === 'progressBar' && (
-                  <Tooltip title={t('detection.editor.train.tip', 'Drop labeled samples and let the trainer derive color, tolerance, and direction.')}>
-                    <CompactButton
-                      size="small"
-                      icon={<ExperimentOutlined />}
-                      onClick={() => setTrainOpen(true)}
-                    >
-                      {t('detection.editor.train', 'Train')}
-                    </CompactButton>
-                  </Tooltip>
-                )}
+                <Tooltip title={t('detection.editor.train.tip', 'Open the kind-specific training wizard.')}>
+                  <CompactButton
+                    size="small"
+                    icon={<ExperimentOutlined />}
+                    onClick={() => setTrainOpen(true)}
+                  >
+                    {t('detection.editor.train', 'Train')}
+                  </CompactButton>
+                </Tooltip>
                 <CompactButton
                   size="small"
                   icon={<PlayCircleOutlined />}
@@ -409,7 +405,6 @@ export const DetectionsPanel: React.FC = () => {
               <DetectionEditor
                 draft={draft}
                 siblingDetections={detections}
-                templates={templates}
                 onChange={setDraft}
               />
               {draftResult && <DetectionResultBanner result={draftResult} />}
@@ -480,10 +475,8 @@ const DetectionResultBanner: React.FC<{ result: DetectionResult }> = ({ result }
 
 function summarizeResult(r: DetectionResult): string {
   if (!r.found) return 'no match';
-  if (r.kind === 'progressBar' && r.value != null) return `fill ${(r.value * 100).toFixed(1)}%`;
-  if (r.kind === 'effect') return r.triggered ? `triggered (${(r.value ?? 0).toFixed(2)})` : `quiet (${(r.value ?? 0).toFixed(2)})`;
-  if (r.kind === 'colorPresence') return `${r.value ?? r.blobs?.length ?? 0} blobs`;
-  if (r.kind === 'region' && r.match) return `region ${r.match.w}×${r.match.h} @ (${r.match.x}, ${r.match.y})`;
+  if (r.kind === 'bar' && r.value != null) return `fill ${(r.value * 100).toFixed(1)}%`;
+  if (r.kind === 'text' && r.text) return `"${r.text.slice(0, 32)}"${r.text.length > 32 ? '…' : ''}`;
   if (r.match) return `(${r.match.cx}, ${r.match.cy}) ${(r.confidence ?? 0).toFixed(2)}`;
   return 'matched';
 }
@@ -510,17 +503,14 @@ function drawOverlay(
   const label = draft?.output?.overlay?.label || draft?.name || result.kind;
   const color = draft?.output?.overlay?.color || (result.found ? '#52c41a' : '#fa8c16');
 
-  if (result.kind === 'progressBar') {
+  if (result.kind === 'bar') {
     if (result.match) outline(ctx, result.match, '#722ed1', 'dashed');
-    if (result.strip) labeledRect(ctx, result.strip, color, `${label}: ${(result.value ?? 0 * 100).toFixed(1)}% — fill ${((result.value ?? 0) * 100).toFixed(1)}%`);
-  } else if (result.kind === 'colorPresence' && result.blobs) {
-    for (const b of result.blobs) {
-      labeledRect(ctx, b, color, `${label}`);
-    }
+    if (result.strip) labeledRect(ctx, result.strip, color, `${label} — fill ${((result.value ?? 0) * 100).toFixed(1)}%`);
+  } else if (result.kind === 'text' && result.match) {
+    labeledRect(ctx, result.match, color, `${label}: "${(result.text ?? '').slice(0, 24)}"`);
   } else if (result.match) {
     const conf = result.confidence != null ? ` · ${result.confidence.toFixed(3)}` : '';
-    const triggered = result.triggered != null ? (result.triggered ? ' · TRIGGERED' : '') : '';
-    labeledRect(ctx, result.match, color, `${label}${conf}${triggered}`);
+    labeledRect(ctx, result.match, color, `${label}${conf}`);
   }
 }
 
