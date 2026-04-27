@@ -1,0 +1,104 @@
+/* ToolsView grid-of-tool-cards layout. */
+
+.tools-view-container {
+  height: 100%;
+  overflow: auto;
+  padding: 24px;
+}
+
+.tools-view-content {
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+/* Outer bordered box (header strip + tool grid). */
+.tools-view-box {
+  background: var(--color-card-bg);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-base);
+}
+
+.tools-view-header {
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  background: var(--color-card-header-bg);
+  border-bottom: 1px solid var(--color-border-secondary);
+}
+
+.tools-view-title {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--color-text-base);
+}
+
+.tools-view-box .ant-row {
+  padding: 24px;
+}
+
+/* Tool card — compact, hoverable, fixed minimum height for visual rhythm. */
+.tool-card-clickable {
+  cursor: pointer;
+  transition: all 0.2s ease;
+  height: 100%;
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-elevated) !important;
+  margin-bottom: 0 !important; /* override CompactCard default 16px */
+}
+
+[data-theme="dark"] .tool-card-clickable.ant-card-hoverable:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+[data-theme="light"] .tool-card-clickable.ant-card-hoverable:hover {
+  border-color: rgba(5, 5, 5, 0.06);
+}
+
+.tool-card-clickable .ant-card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.tool-card-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.tool-card-icon {
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--color-primary);
+}
+
+.tool-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--color-text-base);
+}
+
+.tool-card-description {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  margin-left: 24px;
+}
+
+/* When a tool manages its own padding (e.g. CapturePanel), strip SlideInScreen body padding. */
+.tools-view-tool-body {
+  padding: 0 !important;
+}

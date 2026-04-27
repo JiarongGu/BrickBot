@@ -1,0 +1,149 @@
+/* SlideInScreen — slide-in-from-right panel with blur backdrop on the left. */
+
+.slide-in-screen-container {
+  position: fixed;
+  top: var(--layout-header-height, 40px);
+  left: 0;
+  right: 0;
+  /* Stop above the footer so the status bar stays interactive while a panel is open.
+     +1px to cover the footer's top border. */
+  bottom: calc(var(--layout-statusbar-height, 32px) + 1px);
+  display: flex;
+  z-index: 1000;
+  pointer-events: auto;
+  animation: slide-in-screen-in 0.2s ease-out;
+}
+
+.slide-in-screen-container.closing {
+  animation: slide-in-screen-out 0.2s ease-in forwards;
+}
+
+/* Left strip: blurred view of the screen behind, click-to-close.
+   Width is set inline via the level prop (5% level 1 / 8% level 2 / 11% level 3+).
+   The panel takes the remaining space via flex:1, so a single panel
+   uses ~95% of the viewport — left indent is just a thin tap-target. */
+.slide-in-screen-blur-backdrop {
+  flex: 0 0 auto;
+  position: relative;
+  cursor: pointer;
+}
+
+.slide-in-screen-level-1 .slide-in-screen-blur-backdrop {
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.slide-in-screen-level-2 .slide-in-screen-blur-backdrop {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.slide-in-screen-level-3 .slide-in-screen-blur-backdrop,
+.slide-in-screen-level-4 .slide-in-screen-blur-backdrop {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.slide-in-screen-blur-backdrop::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
+
+/* Soft fade between blur strip and panel. */
+.slide-in-screen-blur-edge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 40px;
+  background: linear-gradient(to right, transparent, var(--color-bg-container));
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Right panel: takes the remaining width after the blur strip. */
+.slide-in-screen-panel {
+  flex: 1;
+  background: var(--color-bg-container);
+  display: flex;
+  flex-direction: column;
+  pointer-events: auto;
+  border-left: 1px solid var(--color-border-secondary);
+  position: relative; /* anchor for the loading overlay */
+}
+
+.slide-in-screen-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--color-border-secondary);
+  flex-shrink: 0;
+}
+
+.slide-in-screen-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-base);
+}
+
+.slide-in-screen-close-btn {
+  color: var(--color-text-secondary);
+}
+
+.slide-in-screen-close-btn:hover {
+  color: var(--color-text-base);
+}
+
+.slide-in-screen-content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px 20px;
+  background: var(--color-bg-container);
+}
+
+/* Caller can opt out of default padding by passing a bodyClassName that overrides it. */
+
+.slide-in-screen-content::-webkit-scrollbar { width: 8px; }
+.slide-in-screen-content::-webkit-scrollbar-track { background: var(--color-bg-base); }
+.slide-in-screen-content::-webkit-scrollbar-thumb { background: var(--color-border-secondary); border-radius: 4px; }
+.slide-in-screen-content::-webkit-scrollbar-thumb:hover { background: var(--color-text-tertiary); }
+
+.slide-in-screen-loading-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  gap: 12px;
+}
+
+.slide-in-screen-loading-text {
+  color: #fff;
+  font-size: 14px;
+}
+
+@keyframes slide-in-screen-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes slide-in-screen-out {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+
+/* Cap blur strip width on small screens — keep the close-tap target thin. */
+@media (max-width: 768px) {
+  .slide-in-screen-blur-backdrop {
+    width: 5% !important;
+  }
+}

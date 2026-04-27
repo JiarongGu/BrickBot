@@ -1,0 +1,9 @@
+.status-icon-loaded {
+  color: var(--color-success);
+  font-size: 18px;
+}
+
+.status-icon-not-loaded {
+  color: var(--color-text-quaternary);
+  font-size: 18px;
+}

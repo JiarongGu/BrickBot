@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="BrickBot.Tests/BrickBot.Tests.csproj" />
+  <Project Path="BrickBot/BrickBot.csproj" />
+</Solution>

@@ -1,0 +1,86 @@
+.scripts-view-container {
+  height: 100%;
+  padding: 16px;
+}
+
+.scripts-view-grid {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 12px;
+  height: 100%;
+}
+
+.scripts-view-list {
+  height: 100%;
+  overflow: auto;
+}
+
+.scripts-view-section {
+  margin-bottom: 16px;
+}
+
+.scripts-view-section__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-base);
+  margin-bottom: 4px;
+}
+
+.scripts-view-section__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scripts-view-section__count {
+  color: var(--color-text-tertiary);
+  font-weight: 400;
+}
+
+.scripts-view-section__hint {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.scripts-view-section__empty {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  padding: 12px 8px;
+  border: 1px dashed var(--color-border-secondary);
+  border-radius: var(--border-radius-base);
+  text-align: center;
+}
+
+.scripts-view-item {
+  cursor: pointer;
+  border-radius: var(--border-radius-sm);
+}
+
+.scripts-view-item:hover {
+  background: var(--color-bg-spotlight);
+}
+
+.scripts-view-item--active {
+  background: var(--color-primary-bg) !important;
+  border-left: 2px solid var(--color-primary);
+}
+
+.scripts-view-item__name {
+  font-size: 13px;
+  font-family: source-code-pro, Menlo, Monaco, Consolas, monospace;
+}
+
+.scripts-view-editor {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* CapturePanel manages its own padding — strip the SlideInScreen body default. */
+.scripts-view-capture-body {
+  padding: 0 !important;
+}

@@ -1,0 +1,60 @@
+/* SettingsView Component Styles */
+
+.settings-view-container {
+  height: 100%;
+  overflow: auto;
+  padding: 24px;
+}
+
+.settings-view-content-wrapper {
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.settings-view-content-wrapper .ant-form-item {
+  margin-bottom: 8px !important;
+}
+
+.settings-view-card-margin {
+  margin-bottom: 24px;
+}
+
+.settings-view-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* Tabs */
+.settings-view-content-wrapper .ant-tabs .ant-tabs-tab {
+  padding: 8px;
+}
+
+.settings-view-content-wrapper .ant-tabs .ant-tabs-tab + .ant-tabs-tab {
+  margin: 0 0 0 12px;
+}
+
+.settings-view-content-wrapper .ant-tabs .ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--color-primary);
+}
+
+.settings-view-content-wrapper .ant-tabs .ant-tabs-ink-bar {
+  background: var(--color-primary);
+}
+
+.settings-view-content-wrapper .ant-tabs .ant-tabs-tab-btn > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Card title */
+.settings-view-content-wrapper .ant-card-head-title {
+  font-size: 14px;
+}
+
+.settings-view-content-wrapper .ant-card-head {
+  padding: 0 16px;
+  min-height: 48px;
+  background: var(--color-card-header-bg);
+}

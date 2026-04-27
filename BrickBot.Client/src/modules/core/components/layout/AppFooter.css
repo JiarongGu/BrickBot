@@ -1,0 +1,62 @@
+/* AppFooter — 32px status bar mirroring .AppStatusBar. */
+
+.app-footer {
+  background: var(--color-bg-spotlight);
+  border-top: 1px solid var(--color-border-base);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.app-footer-main {
+  height: var(--layout-statusbar-height);
+  line-height: var(--layout-statusbar-height);
+  padding: 0 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  gap: 16px;
+}
+
+.app-footer-version {
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.app-footer-version:hover {
+  color: var(--color-text-secondary);
+}
+
+/* Progress strip on the left — runs while the script runner is active. */
+.app-footer-task-area {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+  height: 100%;
+  padding: 0 4px;
+}
+
+.app-footer-progress-track {
+  width: 80px;
+  height: 6px;
+  background: var(--color-border-secondary);
+  border-radius: 1px;
+  overflow: hidden;
+  position: relative;
+}
+
+.app-footer-progress-indeterminate {
+  height: 100%;
+  width: 40%;
+  background: var(--color-primary);
+  border-radius: 1px;
+  animation: app-footer-progress-slide 1.5s ease-in-out infinite;
+}
+
+@keyframes app-footer-progress-slide {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(150%); }
+  100% { transform: translateX(250%); }
+}

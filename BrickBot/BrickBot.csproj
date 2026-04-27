@@ -1,0 +1,94 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- TFM pinned to 19041 for Windows.Graphics.Capture (WinRT) APIs -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>false</UseWPF>
+    <!-- Disable CET (Hardware-enforced Stack Protection) to prevent
+         STATUS_STACK_BUFFER_OVERRUN crash when shell extensions (image
+         thumbnail providers) load in file dialogs. These older DLLs
+         aren't CET-compatible and trigger shadow stack violations. -->
+    <CetCompat>false</CetCompat>
+    <!-- Application Icon (TODO: ship a real icon at BrickBot/favicon.ico) -->
+    <ApplicationIcon Condition="Exists('favicon.ico')">favicon.ico</ApplicationIcon>
+    <!-- Version Information -->
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0</AssemblyVersion>
+    <FileVersion>0.1.0</FileVersion>
+    <InformationalVersion>0.1.0</InformationalVersion>
+    <!-- Application Metadata -->
+    <Product>BrickBot</Product>
+    <Company>JiarongGu</Company>
+    <Copyright>Copyright © 2026 JiarongGu</Copyright>
+    <Description>Game automation app — scriptable image detection and input control. Fishing first, action games later.</Description>
+  </PropertyGroup>
+  <!-- Release configuration: disable debug symbols and hide console window -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <!-- WinExe hides the console window in production -->
+    <OutputType>WinExe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Costura.Fody" Version="6.0.0">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Dapper" Version="2.1.72" />
+    <PackageReference Include="FluentMigrator" Version="8.0.1" />
+    <PackageReference Include="FluentMigrator.Runner.SQLite" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3800.47" />
+    <PackageReference Include="Jint" Version="4.0.3" />
+    <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260330" />
+    <PackageReference Include="OpenCvSharp4.Extensions" Version="4.13.0.20260330" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260302" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+  </ItemGroup>
+  <!-- Embedded resources (inside DLL/EXE) -->
+  <ItemGroup>
+    <!-- Embed wwwroot files as embedded resources -->
+    <EmbeddedResource Include="wwwroot\**\*.*" Condition="Exists('wwwroot')">
+      <LogicalName>BrickBot.wwwroot.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <!-- Embed application icon (only if file exists) -->
+    <EmbeddedResource Include="favicon.ico" Condition="Exists('favicon.ico')">
+      <LogicalName>BrickBot.favicon.ico</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+  <!-- Language files (separate files next to exe) -->
+  <ItemGroup>
+    <Folder Include="Languages\" />
+    <Content Include="Languages\**\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      <TargetPath>data\languages\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+    </Content>
+  </ItemGroup>
+  <!-- Single-file publish configuration -->
+  <PropertyGroup>
+    <!-- Enable single-file publish -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <!-- Include native libraries for self-extract -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- DO NOT extract content files - keep them separate -->
+    <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
+    <!-- Enable ReadyToRun for faster startup -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <!-- Trim unused code (be careful with reflection-based code) -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <!-- Disable XML documentation output -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <PublishDocumentationFile>false</PublishDocumentationFile>
+    <!-- Don't copy XML docs from dependencies -->
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
+  </PropertyGroup>
+</Project>

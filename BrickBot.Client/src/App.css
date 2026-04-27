@@ -1,0 +1,24 @@
+/* App Component Styles — top-level layout container.
+   AppHeader / AppFooter own their own CSS in modules/core/components/layout/. */
+
+.app-main-layout {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-content {
+  flex: 1;
+  padding: 0;
+  background: var(--color-bg-container);
+  overflow: hidden;
+}
+
+/* Each view manages its own padding/scroll. RunnerPage sets its internal layout,
+   SettingsPanel + ToolsView use 24px outer padding, ScriptsView grids. */
+
+.app-boot {
+  display: flex;
+  justify-content: center;
+  padding: 64px;
+}

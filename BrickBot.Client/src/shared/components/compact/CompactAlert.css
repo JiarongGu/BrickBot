@@ -1,0 +1,32 @@
+/* CompactAlert — tighter padding + smaller icons than AntD default. */
+
+.compact-alert.ant-alert {
+  padding: 8px 12px !important;
+  margin-bottom: 12px;
+  font-size: 14px !important;
+}
+
+.compact-alert.compact-alert-extra.ant-alert {
+  padding: 6px 10px !important;
+  margin-bottom: 8px;
+}
+
+/* Subtle tinted backgrounds in both themes — works because tint colors are theme-neutral. */
+.compact-alert.ant-alert-info { background-color: rgba(24, 144, 255, 0.05) !important; border-color: rgba(24, 144, 255, 0.15) !important; }
+.compact-alert.ant-alert-success { background-color: rgba(82, 196, 26, 0.05) !important; border-color: rgba(82, 196, 26, 0.15) !important; }
+.compact-alert.ant-alert-warning { background-color: rgba(250, 173, 20, 0.05) !important; border-color: rgba(250, 173, 20, 0.15) !important; }
+.compact-alert.ant-alert-error { background-color: rgba(255, 77, 79, 0.05) !important; border-color: rgba(255, 77, 79, 0.15) !important; }
+
+.compact-alert.ant-alert .ant-alert-icon { font-size: 16px !important; margin-right: 8px !important; }
+.compact-alert.compact-alert-extra.ant-alert .ant-alert-icon { font-size: 14px !important; margin-right: 6px !important; }
+
+/* With description — slightly more padding to fit. */
+.compact-alert.ant-alert.ant-alert-with-description { padding: 12px 15px !important; }
+.compact-alert.compact-alert-extra.ant-alert.ant-alert-with-description { padding: 10px 12px !important; }
+
+.compact-alert.ant-alert.ant-alert-with-description .ant-alert-icon { font-size: 20px !important; margin-right: 10px !important; margin-top: 4px !important; }
+.compact-alert.compact-alert-extra.ant-alert.ant-alert-with-description .ant-alert-icon { font-size: 18px !important; margin-right: 8px !important; }
+
+.compact-alert.ant-alert .ant-alert-message { font-size: 14px !important; margin-bottom: 0 !important; }
+.compact-alert.ant-alert .ant-alert-description { font-size: 14px !important; line-height: 1.5 !important; margin-top: 4px !important; }
+.compact-alert.ant-alert .ant-alert-close-icon { font-size: 12px !important; }

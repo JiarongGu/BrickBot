@@ -1,0 +1,73 @@
+/* ProfileManager Component Styles. BEM naming. */
+
+.profile-manager-container {
+  height: 100%;
+  overflow: auto;
+  padding: 24px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.profile-manager-container .ant-btn {
+  min-width: 32px;
+  min-height: 28px;
+}
+
+.profile-manager-vertical-space {
+  width: 100%;
+}
+
+.profile-manager-empty {
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--color-text-tertiary);
+}
+
+.profile-manager-item {
+  border-left-width: 4px;
+  border-left-style: solid;
+  border-left-color: var(--color-primary);
+  border-bottom: 1px solid var(--color-border-secondary);
+  padding: 12px 8px 12px 16px;
+  background-color: var(--color-bg-elevated);
+  border-radius: var(--border-radius-base);
+  transition: background-color 0.15s ease;
+}
+
+.profile-manager-item:hover {
+  background-color: var(--color-bg-spotlight);
+}
+
+.profile-manager-item--active {
+  border: 1px solid var(--color-border-base);
+  border-left-width: 4px;
+}
+
+.profile-manager-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.profile-manager-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.profile-manager-name {
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--color-text-base);
+}
+
+.profile-manager-description {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}

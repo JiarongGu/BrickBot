@@ -1,0 +1,62 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet build *)",
+      "Bash(dotnet build:*)",
+      "Bash(dotnet test:*)",
+      "Bash(npx tsc *)",
+      "Bash(npx tsc:*)",
+      "Bash(npx vite:*)",
+      "Bash(npx jest:*)",
+      "Bash(npm ls:*)",
+      "Bash(grep -E *)",
+      "Bash(xargs grep:*)",
+      "Bash(xargs head:*)",
+      "Edit(/.claude/skills/doc-loader/**)",
+      "Edit(/.claude/skills/pattern-finder/**)",
+      "Edit(/.claude/skills/skill-loader/**)",
+      "Edit(/.claude/skills/doc-monitor/**)",
+      "Edit(/.claude/skills/doc-cleanup/**)",
+      "Edit(/.claude/skills/doc-optimize/**)",
+      "Edit(/.claude/skills/doc-update-guide/**)",
+      "Edit(/.claude/skills/doc-update-reference/**)",
+      "Edit(/.claude/skills/doc-update-technical/**)",
+      "Edit(/.claude/skills/post-feature/**)",
+      "Edit(/.claude/skills/release-notes/**)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Skill(keybindings-help)",
+      "Skill(keybindings-help:*)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)"
+    ],
+    "additionalDirectories": [
+      ".claude",
+      ".claude/rules",
+      ".claude/skills"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[GATE] Coding task? FIRST tool calls MUST be all 4 core skills in parallel:\\n  1. Skill(skill-loader, args=\"task description\")\\n  2. Skill(doc-loader, args=\"task description scope\")\\n  3. Skill(pattern-finder, args=\"PatternType Module\")\\n  4. Skill(caveman)\\nThen: read routed docs → invoke INVOKE list → print match summary → only THEN explore code.\\nSkipping ANY skill = non-conforming code. Zero exceptions for \"I already know\" or \"simple fix\".'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[SKILL-CHECK] Did you state and invoke the code-gen skill for this change? Hand-write only unique business logic inside skill-generated structures. (CLAUDE.md §0)'"
+          }
+        ]
+      }
+    ]
+  }
+}

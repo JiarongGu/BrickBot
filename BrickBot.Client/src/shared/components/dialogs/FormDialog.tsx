@@ -1,0 +1,86 @@
+import React, { useEffect } from 'react';
+import { Modal } from 'antd';
+import { CloseOutlined } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
+import { CompactButton, CompactSpace } from '../compact';
+import { useDelayedLoading } from '@/shared/hooks/useDelayedLoading';
+import './FormDialog.css';
+
+/**
+ * FormDialog — opinionated Modal for forms / multi-input flows. Square close button,
+ * compact footer with primary "OK" + danger "Cancel". Pass `footer={null}` (or any
+ * ReactNode) to override the default footer entirely.
+ */
+export interface FormDialogProps {
+  visible: boolean;
+  title: React.ReactNode;
+  children: React.ReactNode;
+  okText?: string;
+  cancelText?: string;
+  onOk?: () => void | Promise<void>;
+  onCancel: () => void;
+  width?: number;
+  footer?: React.ReactNode;
+  destroyOnHidden?: boolean;
+}
+
+export const FormDialog: React.FC<FormDialogProps> = ({
+  visible,
+  title,
+  children,
+  okText,
+  cancelText,
+  onOk,
+  onCancel,
+  width = 520,
+  footer,
+  destroyOnHidden = false,
+}) => {
+  const { t } = useTranslation();
+  const resolvedOkText = okText ?? t('common.save');
+  const resolvedCancelText = cancelText ?? t('common.cancel');
+  const { loading, execute, reset } = useDelayedLoading(200);
+
+  useEffect(() => {
+    if (!visible) reset();
+  }, [visible, reset]);
+
+  const handleOk = async () => {
+    if (!onOk) return;
+    try {
+      await execute(async () => { await onOk(); });
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Operation already in progress') return;
+      throw err;
+    }
+  };
+
+  const modalFooter = footer !== undefined ? footer : (
+    <CompactSpace className="form-dialog-footer">
+      <CompactButton.Danger onClick={onCancel}>{resolvedCancelText}</CompactButton.Danger>
+      {onOk && (
+        <CompactButton type="primary" loading={loading} onClick={handleOk}>
+          {resolvedOkText}
+        </CompactButton>
+      )}
+    </CompactSpace>
+  );
+
+  return (
+    <Modal
+      className="form-dialog"
+      title={title}
+      open={visible}
+      onCancel={onCancel}
+      centered
+      transitionName=""
+      maskTransitionName=""
+      closeIcon={<div className="form-dialog-close-button"><CloseOutlined /></div>}
+      footer={modalFooter}
+      width={width}
+      destroyOnHidden={destroyOnHidden}
+    >
+      <div className="form-dialog-content">{children}</div>
+    </Modal>
+  );
+};
