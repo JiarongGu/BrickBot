@@ -28,7 +28,11 @@
       "Skill(keybindings-help)",
       "Skill(keybindings-help:*)",
       "Skill(claude-api)",
-      "Skill(claude-api:*)"
+      "Skill(claude-api:*)",
+      "Bash(git commit -m ' *)",
+      "Bash(git branch *)",
+      "Bash(git config *)",
+      "Bash(git add *)"
     ],
     "additionalDirectories": [
       ".claude",

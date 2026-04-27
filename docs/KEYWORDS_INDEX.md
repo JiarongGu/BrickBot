@@ -13,6 +13,6 @@ Top-level keyword → file lookup. For deeper jumps see `keywords/BACKEND.md`, `
 | How-to lookup | [keywords/HOW_TO.md](keywords/HOW_TO.md) | — |
 | Build / run | [core/DEVELOPMENT.md](core/DEVELOPMENT.md) | Build |
 | Testing | [ai-assistant/TESTING_GUIDE.md](ai-assistant/TESTING_GUIDE.md) | — |
-| Lua scripting API | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-002 |
+| JavaScript scripting API | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-007 (supersedes D-002) |
 | Capture pipeline | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-003 |
 | Vision (OpenCV) | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-004 |

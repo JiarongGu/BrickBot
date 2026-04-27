@@ -52,7 +52,7 @@ public class TemplateMatcherTests
 1. **Pure logic** — vision matching thresholds, coordinate translations, script step interpretation.
 2. **Service business rules** — Runner state machine (idle → running → paused → stopped), Profile validation.
 3. **IPC round-trip** — facade routes the right service method, payload extraction, response shape.
-4. **Lua sandbox** — that denied APIs throw, that allowed APIs work, that cancellation interrupts a long script.
+4. **JS sandbox** — that denied APIs throw, that allowed APIs work, that cancellation interrupts a long script.
 
 ## What NOT to test
 

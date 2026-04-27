@@ -6,16 +6,16 @@ A Windows desktop application that automates gameplay by:
 1. **Watching** a target game window (high-FPS screen capture).
 2. **Seeing** the game (image template matching, color detection, OCR — via OpenCV).
 3. **Acting** on the game (mouse/keyboard simulation via Win32 SendInput).
-4. **Following user-written scripts** (Lua, evaluated by MoonSharp) that chain detection + action.
+4. **Following user-written scripts** (JavaScript, evaluated by Jint) that chain detection + action.
 
 Initial use case: fishing automation. Designed to extend to action games — capture pipeline targets 60+ FPS so script logic can react to fast on-screen events.
 
 ## Why this stack
 
 - **WinForms + WebView2 host** — native Win32 access for input/capture, modern web UI for script editing and live preview.
-- **React + TypeScript + Ant Design + Zustand** — proven UX stack, fast iteration, Monaco editor for in-app Lua editing.
+- **React + TypeScript + Ant Design + Zustand** — proven UX stack, fast iteration, Monaco editor for in-app script editing.
 - **OpenCvSharp4** — full OpenCV power without writing C++. Multi-scale template matching, color filtering, ROI processing.
-- **MoonSharp (Lua)** — embedded scripting that's safe to sandbox, simple syntax for users, game-industry familiar.
+- **Jint (JavaScript)** — pure-C# embedded interpreter, no native deps. Familiar syntax for users, sandboxable, supports a behavior-tree stdlib for action-game combat.
 - **Windows.Graphics.Capture** — modern WinRT API; works with DirectX games and is hardware-accelerated.
 
 ## Module list
@@ -26,7 +26,7 @@ Initial use case: fishing automation. Designed to extend to action games — cap
 | `Vision` | Template matching, color detect, OCR. Reads from frame buffer. |
 | `Input` | Win32 SendInput for mouse/keyboard. Coordinates relative to capture target. |
 | `Template` | Manage per-profile template image library (PNGs + thumbnails). |
-| `Script` | Store + version user Lua scripts. |
+| `Script` | Store + load user JavaScript files (`main/` + `library/`) per profile. |
 | `Runner` | Orchestrate a running session (start/stop/pause, live log, cancellation). |
 | `Profile` | Per-game profiles bundling capture target + script + templates + settings. |
 | `Setting` | App-wide settings (hotkeys, default FPS, theme, etc.). |
@@ -37,11 +37,11 @@ Initial use case: fishing automation. Designed to extend to action games — cap
 User clicks Run
   → RunnerService.Start(profileId)
     → CaptureService starts grabbing frames into shared buffer
-    → ScriptEngine spins up Lua coroutine with profile's script
+    → JintScriptEngine boots: init.js → combat.js → library/*.js (alphabetical) → main/<selected>.js
     → Script calls vision.find(template) → reads frame buffer, runs template match, returns match
     → Script calls input.click(x, y) → SendInput at translated coords
     → Loop, with stop/pause checked between calls
-  → User clicks Stop → cancellation token fires → coroutine unwinds → Capture stops
+  → User clicks Stop → cancellation token fires → engine unwinds → Capture stops
 ```
 
 ## Repository layout
