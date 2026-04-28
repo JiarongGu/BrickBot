@@ -1,10 +1,8 @@
-// Frontend mirror of BrickBot/Modules/Detection/Models/DetectionDefinition.cs.
-// NOTE: Enums are camelCase because IpcHandler serializes with JsonStringEnumConverter(CamelCase).
+// Frontend mirror of BrickBot/Modules/Detection/Models/.
+// NOTE: Enums are camelCase because IpcHandler serializes with JsonStringEnumConverter(CamelCase)
 
 /**
- * Locked-in detection kinds (the legacy template/colorPresence/effect/featureMatch/region
- * kinds were deleted in the v2 rewrite). Pick the kind that matches the visual you want
- * to detect:
+ * Locked-in detection kinds:
  *   • `tracker` — moving sprite / character location (OpenCV KCF / CSRT / MIL).
  *   • `pattern` — static element appearance via ORB descriptors. Background-invariant.
  *   • `text`    — OCR text (Tesseract). Buff names, status banners, quest text.
@@ -14,18 +12,22 @@ export type DetectionKind =
   | 'tracker'
   | 'pattern'
   | 'text'
-  | 'bar';
+  | 'bar'
+  | 'composite';
 
-/** RGB threshold = literal color match. HSV = hue-window match, robust against lighting drift. */
+/** Boolean op for composite detections. */
+export type CompositeOp = 'and' | 'or';
+
+/** Mode for interpreting DetectionRoi.x/y/w/h when fromDetectionId is set. */
+export type RoiOffsetMode = 'inset' | 'relative';
+
 export type ColorSpace = 'rgb' | 'hsv';
 
-/** 9-point window-relative origin used by anchored ROIs. */
 export type AnchorOrigin =
   | 'topLeft' | 'topCenter' | 'topRight'
   | 'midLeft' | 'center' | 'midRight'
   | 'bottomLeft' | 'bottomCenter' | 'bottomRight';
 
-/** Direction the bar grows toward — drives the per-line scan in LinearFillRatio. */
 export type FillDirection = 'leftToRight' | 'rightToLeft' | 'topToBottom' | 'bottomToTop';
 
 export const ANCHOR_ORIGINS: AnchorOrigin[] = [
@@ -39,11 +41,15 @@ export interface DetectionRoi {
   y: number;
   w: number;
   h: number;
-  /** When set, x/y are offsets from the anchor on the current frame; w/h are absolute sizes. */
   anchor?: AnchorOrigin;
-  /** When set, this ROI is the referenced detection's match bbox; x/y/w/h are inset margins
-   *  (left, top, right, bottom). Composes one detection on top of another. */
   fromDetectionId?: string;
+  /** How x/y/w/h are interpreted when fromDetectionId is set. Default 'inset' (back-compat). */
+  offsetMode?: RoiOffsetMode;
+}
+
+export interface CompositeOptions {
+  op: CompositeOp;
+  detectionIds: string[];
 }
 
 export interface RgbColor {
@@ -53,61 +59,32 @@ export interface RgbColor {
 }
 
 // ============================================================================
-//  Per-kind options
+//  Per-kind options — RUNTIME KNOBS only. Trained artifacts live on DetectionModel.
 // ============================================================================
 
-/** OpenCV visual tracker algorithm. KCF balanced (default), CSRT most accurate (slow),
- *  MIL robust to short occlusions (moderate). */
 export type TrackerAlgorithm = 'kcf' | 'csrt' | 'mil';
 
 export interface TrackerOptions {
-  /** Base64 PNG of the frame the tracker was initialized on. */
-  initFramePng?: string;
-  /** Initial bbox in window-relative pixels — the user's drag-rectangle at training time. */
-  initX: number;
-  initY: number;
-  initW: number;
-  initH: number;
   algorithm: TrackerAlgorithm;
-  /** When the tracker reports lost, automatically re-init from the saved frame on next call. */
   reacquireOnLost: boolean;
 }
 
 export interface PatternOptions {
-  /** Reference patch (cropped to trained element). Used for re-training + overlay viz. */
-  embeddedPng?: string;
-  /** Base64 ORB descriptor blob (rows × 32 bytes, row-major). */
-  descriptors?: string;
-  /** Number of trained keypoints (descriptor blob row count). */
-  keypointCount: number;
-  /** Reference patch dimensions — used to project matched keypoints into a bbox. */
-  templateWidth: number;
-  templateHeight: number;
-  /** Lowe ratio test threshold (0..1, lower = stricter). */
   loweRatio: number;
-  /** Minimum match-ratio (0..1) to count as found. */
   minConfidence: number;
-  /** Cap on ORB keypoints extracted per frame at runtime. */
   maxRuntimeKeypoints: number;
 }
 
 export interface TextOptions {
-  /** Tesseract language tag (e.g. `eng`, `chi_sim`, `jpn`). */
   language: string;
-  /** Page-segmentation mode: 7 = single line (default for game UI), 8 = single word, 6 = block. */
   pageSegMode: number;
-  /** Optional regex — only count as found when the OCR result matches. */
   matchRegex?: string;
-  /** Minimum Tesseract confidence (0..100). */
   minConfidence: number;
-  /** Pre-binarize the ROI before OCR. */
   binarize: boolean;
-  /** Upscale factor before OCR (Tesseract prefers larger glyphs). */
   upscaleFactor: number;
 }
 
 export interface BarOptions {
-  /** Optional Pattern detection id whose match bbox locates the bar; empty = use ROI. */
   anchorPatternId?: string;
   fillColor: RgbColor;
   tolerance: number;
@@ -128,13 +105,10 @@ export interface DetectionOverlay {
   label?: string;
 }
 
-/** Output value shape — drives `result.typedValue`. */
 export type DetectionOutputType = 'boolean' | 'number' | 'text' | 'bbox' | 'bboxes' | 'point';
 
 export interface DetectionStability {
-  /** Value must hold steady for this many ms before being surfaced. 0 = no debounce. */
   minDurationMs: number;
-  /** Numeric jitter tolerance for "same value" comparison (0 = exact equality). */
   tolerance: number;
 }
 
@@ -153,12 +127,85 @@ export interface DetectionDefinition {
   kind: DetectionKind;
   group?: string;
   enabled: boolean;
+  /** Runtime SEARCH region — where the runner looks. Distinct from training samples'
+   *  per-sample object boxes. Null = whole frame. */
   roi?: DetectionRoi;
   tracker?: TrackerOptions;
   pattern?: PatternOptions;
   text?: TextOptions;
   bar?: BarOptions;
+  composite?: CompositeOptions;
+  /** Flip the result's `found` flag. Saves boilerplate vs `!detect.run(x).found`. */
+  inverse?: boolean;
+  /** Auto-disable after N successful runs in current Run. Null/0 = unlimited. */
+  maxHit?: number;
   output: DetectionOutput;
+  /** Annotated by the LIST endpoint — true when a trained model file exists for this id. */
+  hasModel?: boolean;
+}
+
+// ============================================================================
+//  DetectionModel — compiled trainer output (separate from DetectionDefinition)
+// ============================================================================
+
+export interface TrackerModelData {
+  initFramePng: string;
+  initX: number;
+  initY: number;
+  initW: number;
+  initH: number;
+}
+
+export interface PatternModelData {
+  descriptors: string;
+  keypointCount: number;
+  templateWidth: number;
+  templateHeight: number;
+  embeddedPng: string;
+}
+
+export interface TextModelData {
+  boxX: number;
+  boxY: number;
+  boxW: number;
+  boxH: number;
+  embeddedPng: string;
+}
+
+export interface BarModelData {
+  boxX: number;
+  boxY: number;
+  boxW: number;
+  boxH: number;
+  fillColor: RgbColor;
+  tolerance: number;
+  direction: FillDirection;
+  lineThreshold: number;
+  embeddedPng: string;
+}
+
+export interface CompositeModelData {
+  op: CompositeOp;
+  detectionIds: string[];
+}
+
+export interface DetectionModel {
+  id: string;
+  detectionId: string;
+  kind: DetectionKind;
+  version: number;
+  trainedAt: string;
+  sampleCount: number;
+  positiveCount: number;
+  negativeCount: number;
+  meanError: number;
+  meanIoU: number;
+  summary: string;
+  tracker?: TrackerModelData;
+  pattern?: PatternModelData;
+  text?: TextModelData;
+  bar?: BarModelData;
+  composite?: CompositeModelData;
 }
 
 // ============================================================================
@@ -175,43 +222,53 @@ export interface DetectionResult {
   kind: DetectionKind;
   found: boolean;
   durationMs: number;
-  /** Bar fill ratio (0..1). */
   value?: number;
-  /** Match bbox (tracker / pattern / bar). */
   match?: ResultBox;
-  /** Pattern keypoint-match ratio; tracker reports null. */
   confidence?: number;
-  /** Bar fill-strip used for the per-line scan. */
   strip?: ResultBox;
-  /** OCR result text (Text kind only). */
   text?: string;
 }
 
 export interface TrainingSample {
   imageBase64: string;
   label: string;
-  roi?: DetectionRoi;
+  /** Per-sample object box — where the object IS in this specific frame. Distinct from
+   *  the runtime search ROI on the definition. */
+  objectBox?: DetectionRoi;
+  /** Tracker only: marks this sample as the init frame. */
+  isInit?: boolean;
+}
+
+export interface PredictedBox {
+  x: number; y: number; w: number; h: number;
 }
 
 export interface TrainingDiagnostic {
   label: string;
   predicted: string;
   error: number;
+  predictedBox?: PredictedBox;
+  iou: number;
 }
 
 export interface TrainingResult {
-  suggested?: DetectionDefinition;
+  definition?: DetectionDefinition;
+  model?: DetectionModel;
   diagnostics: TrainingDiagnostic[];
   summary: string;
 }
 
 export interface TrainingSampleInfo {
   id: string;
-  label: string;
+  detectionId: string;
+  label?: string;
+  note?: string;
   capturedAt: string;
   width: number;
   height: number;
   imageBase64?: string;
+  objectBox?: DetectionRoi;
+  isInit: boolean;
 }
 
 /** Wire-compatible with BrickBot.Modules.Detection.Services.NewTrainingSample. */
@@ -220,6 +277,8 @@ export interface NewTrainingSamplePayload {
   imageBase64: string;
   label?: string;
   note?: string;
+  objectBox?: DetectionRoi;
+  isInit?: boolean;
 }
 
 // ============================================================================
@@ -231,9 +290,9 @@ export const DETECTION_KIND_LABEL: Record<DetectionKind, string> = {
   pattern: 'Pattern (visual feature)',
   text: 'Text (OCR)',
   bar: 'Bar (HP / MP / cooldown)',
+  composite: 'Composite (AND / OR)',
 };
 
-/** Default factory — produces a fresh definition with sensible per-kind defaults. */
 export function newDetection(kind: DetectionKind): DetectionDefinition {
   const base: DetectionDefinition = {
     id: '',
@@ -245,15 +304,12 @@ export function newDetection(kind: DetectionKind): DetectionDefinition {
   switch (kind) {
     case 'tracker':
       base.tracker = {
-        initX: 0, initY: 0, initW: 0, initH: 0,
         algorithm: 'kcf',
         reacquireOnLost: true,
       };
       break;
     case 'pattern':
       base.pattern = {
-        keypointCount: 0,
-        templateWidth: 0, templateHeight: 0,
         loweRatio: 0.75,
         minConfidence: 0.20,
         maxRuntimeKeypoints: 500,
@@ -277,6 +333,12 @@ export function newDetection(kind: DetectionKind): DetectionDefinition {
         lineThreshold: 0.4,
         insetLeftPct: 0.30,
         insetRightPct: 0.18,
+      };
+      break;
+    case 'composite':
+      base.composite = {
+        op: 'and',
+        detectionIds: [],
       };
       break;
   }

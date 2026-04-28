@@ -20,38 +20,18 @@ export interface ReviewSample {
   width: number;
   height: number;
   label: string;
+  /** True when the sample has an object-box annotation. Drives the green badge + filter. */
+  hasBox?: boolean;
+  /** True when the sample is the tracker init frame. Drives the blue badge. */
+  isInit?: boolean;
 }
 
-/**
- * Two-pane review of captured samples: thumbnail strip on the left (with
- * multi-select + filter pills + bulk delete) and a big preview canvas on
- * the right with the kind-aware label widget.
- *
- * Selection model:
- *   - Click a row → select it as the active preview (single-select)
- *   - Ctrl/Cmd+Click → toggle that row in the multi-select set
- *   - Shift+Click → range-select from the last clicked row to this one
- *   - Header checkbox → toggle every visible (filtered) row
- *
- * Bulk tools:
- *   - Delete (Del key or trash button) → remove every multi-selected row
- *   - "Apply to selection" / "Apply to all" → broadcast current label
- *   - "Auto 0→1" (ProgressBar only) → evenly spread labels across samples
- *
- * Filter pills (All / Unlabeled / Labeled) scope the visible rows so users
- * can quickly find rows that still need labels.
- *
- * Keyboard: ↑/↓ or J/K cycle samples · 0–9 set label (×0.1 for ProgressBar)
- *           · Del removes selected rows.
- */
 export interface SamplesReviewPaneProps {
   kind: DetectionKind;
   samples: ReviewSample[];
   selected: number;
   selectedIds: Set<string>;
-  /** Source-picker UI rendered above the strip in the left column. */
   toolbar?: React.ReactNode;
-  /** Short string describing the label format for the active detection kind. */
   labelHint: string;
   onSelect: (i: number) => void;
   onToggleId: (id: string) => void;
@@ -77,13 +57,14 @@ export const SamplesReviewPane: React.FC<SamplesReviewPaneProps> = ({
   const [filter, setFilter] = useState<SampleFilter>('all');
   const current = samples[selected];
 
-  // Visible rows after filter — keep original index so callbacks (label, remove,
-  // select) stay correct relative to `samples`.
   const visible = useMemo(
     () => samples.map((s, i) => ({ s, i })).filter(({ s }) => {
       if (filter === 'all') return true;
       const labeled = s.label.trim().length > 0;
-      return filter === 'labeled' ? labeled : !labeled;
+      if (filter === 'labeled') return labeled;
+      if (filter === 'unlabeled') return !labeled;
+      if (filter === 'unboxed') return !s.hasBox;
+      return true;
     }),
     [samples, filter],
   );
@@ -93,10 +74,10 @@ export const SamplesReviewPane: React.FC<SamplesReviewPaneProps> = ({
     [samples],
   );
   const unlabeledCount = samples.length - labeledCount;
+  const unboxedCount = samples.filter((s) => !s.hasBox).length;
   const someSelected = selectedIds.size > 0;
   const allVisibleSelected = visible.length > 0 && visible.every(({ s }) => selectedIds.has(s.id));
 
-  // Render the big preview when the selected sample changes.
   useEffect(() => {
     if (!current || !previewRef.current) return;
     const c = previewRef.current;
@@ -104,7 +85,6 @@ export const SamplesReviewPane: React.FC<SamplesReviewPaneProps> = ({
     if (!ctx) return;
     const img = new Image();
     img.onload = () => {
-      // Draw at native resolution; CSS scales to fit the pane.
       c.width = current.width;
       c.height = current.height;
       ctx.drawImage(img, 0, 0);
@@ -112,9 +92,8 @@ export const SamplesReviewPane: React.FC<SamplesReviewPaneProps> = ({
     img.src = `data:image/png;base64,${current.imageBase64}`;
   }, [current?.id, current?.imageBase64, current?.width, current?.height]);
 
-  // Keyboard nav + bulk delete. Bind to the pane via tabIndex so it focuses on click.
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.target instanceof HTMLInputElement) return;  // don't steal label input keystrokes
+    if (e.target instanceof HTMLInputElement) return;
     if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); onSelect(Math.min(samples.length - 1, selected + 1)); }
     else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); onSelect(Math.max(0, selected - 1)); }
     else if ((e.key === 'Delete' || (e.key === 'Backspace' && (e.ctrlKey || e.metaKey))) && someSelected) {
@@ -128,8 +107,6 @@ export const SamplesReviewPane: React.FC<SamplesReviewPaneProps> = ({
     }
   };
 
-  /* Stable handlers passed to memoized `<SampleRow>`. Without these, every parent
-     render hands out fresh closures and React.memo re-renders every row anyway. */
   const stableRowClick = useEventCallback((e: React.MouseEvent, idx: number, id: string) => {
     if (e.ctrlKey || e.metaKey) {
       onToggleId(id);
@@ -170,6 +147,7 @@ export const SamplesReviewPane: React.FC<SamplesReviewPaneProps> = ({
     { value: 'all', label: t('detection.train.filter.all', 'All'), count: samples.length },
     { value: 'unlabeled', label: t('detection.train.filter.unlabeled', 'Unlabeled'), count: unlabeledCount },
     { value: 'labeled', label: t('detection.train.filter.labeled', 'Labeled'), count: labeledCount },
+    { value: 'unboxed', label: t('detection.train.filter.unboxed', 'No box'), count: unboxedCount },
   ];
 
   return (
@@ -237,6 +215,8 @@ export const SamplesReviewPane: React.FC<SamplesReviewPaneProps> = ({
                   label={s.label}
                   isActive={i === selected}
                   isSelected={selectedIds.has(s.id)}
+                  hasBox={!!s.hasBox}
+                  isInit={!!s.isInit}
                   onClick={stableRowClick}
                   onToggle={stableToggle}
                   onRemove={stableRemove}

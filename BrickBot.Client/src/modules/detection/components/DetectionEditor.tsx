@@ -13,12 +13,15 @@ import type {
   AnchorOrigin,
   BarOptions,
   ColorSpace,
+  CompositeOp,
+  CompositeOptions,
   DetectionDefinition,
   DetectionKind,
   DetectionRoi,
   FillDirection,
   PatternOptions,
   RgbColor,
+  RoiOffsetMode,
   TextOptions,
   TrackerAlgorithm,
   TrackerOptions,
@@ -107,6 +110,31 @@ export const DetectionEditor: React.FC<Props> = ({ draft, siblingDetections, onC
         />
       </div>
 
+      {/* Runtime tunables (kind-agnostic): inverse + max-hit */}
+      <div className="detection-section">
+        <div className="detection-section__title">{t('detection.section.runtime', 'Runtime')}</div>
+        <div className="detection-row-2col">
+          <div className="detection-field">
+            <span className="detection-field__label">{t('detection.field.inverse', 'Inverse result')}</span>
+            <CompactSwitch checked={!!draft.inverse} onChange={(c) => onChange({ ...draft, inverse: c })} />
+          </div>
+          <div className="detection-field">
+            <span className="detection-field__label">{t('detection.field.maxHit', 'Max hit')}: {draft.maxHit ?? 0}</span>
+            <CompactInput
+              size="small"
+              value={draft.maxHit ?? 0}
+              onChange={(e) => {
+                const n = Math.max(0, Number(e.target.value) | 0);
+                onChange({ ...draft, maxHit: n > 0 ? n : undefined });
+              }}
+            />
+          </div>
+        </div>
+        <div className="detection-section__hint">
+          {t('detection.field.inverseHint', 'Flip the found flag.')} {t('detection.field.maxHitHint', '0 = unlimited.')}
+        </div>
+      </div>
+
       {/* ROI */}
       <RoiSection draft={draft} siblings={siblingDetections} onChange={onChange} />
 
@@ -123,6 +151,13 @@ export const DetectionEditor: React.FC<Props> = ({ draft, siblingDetections, onC
       {draft.kind === 'bar' && draft.bar && (
         <BarForm opt={draft.bar} siblings={siblingDetections} onChange={(opt) => onChange({ ...draft, bar: opt })} />
       )}
+      {draft.kind === 'composite' && draft.composite && (
+        <CompositeForm
+          opt={draft.composite}
+          siblings={siblingDetections.filter((s) => s.id !== draft.id && s.kind !== 'composite')}
+          onChange={(opt) => onChange({ ...draft, composite: opt })}
+        />
+      )}
 
       <OutputSection draft={draft} onChange={onChange} />
 
@@ -137,10 +172,11 @@ export const DetectionEditor: React.FC<Props> = ({ draft, siblingDetections, onC
 
 function describeReturnShape(kind: DetectionKind): string {
   switch (kind) {
-    case 'tracker': return 'r.match = current bbox {x,y,w,h,cx,cy} when tracker is locked';
-    case 'pattern': return 'r.match = projected bbox; r.confidence = match-ratio (0..1)';
-    case 'text':    return 'r.text = recognized string; r.confidence = OCR confidence (0..1)';
-    case 'bar':     return 'r.value = fill ratio (0..1); r.match = bar bbox; r.strip = sample band';
+    case 'tracker':   return 'r.match = current bbox {x,y,w,h,cx,cy} when tracker is locked';
+    case 'pattern':   return 'r.match = projected bbox; r.confidence = match-ratio (0..1)';
+    case 'text':      return 'r.text = recognized string; r.confidence = OCR confidence (0..1)';
+    case 'bar':       return 'r.value = fill ratio (0..1); r.match = bar bbox; r.strip = sample band';
+    case 'composite': return 'r.found = AND/OR over operand detections';
   }
 }
 
@@ -158,6 +194,7 @@ const OutputSection: React.FC<{ draft: DetectionDefinition; onChange: (d: Detect
     pattern: 'bbox',
     text: 'text',
     bar: 'number',
+    composite: 'boolean',
   };
   const currentType = out.type ?? defaultType[draft.kind];
   const stab = out.stability ?? { minDurationMs: 0, tolerance: 0 };
@@ -293,6 +330,7 @@ const RoiLinked: React.FC<{ draft: DetectionDefinition; siblings: DetectionDefin
   const { t } = useTranslation();
   const roi = draft.roi ?? { x: 0, y: 0, w: 0, h: 0, fromDetectionId: siblings[0]?.id };
   const set = (patch: Partial<DetectionRoi>) => onChange({ ...draft, roi: { ...roi, ...patch } });
+  const mode: RoiOffsetMode = roi.offsetMode ?? 'inset';
   return (
     <>
       <div className="detection-field">
@@ -304,15 +342,41 @@ const RoiLinked: React.FC<{ draft: DetectionDefinition; siblings: DetectionDefin
           style={{ width: '100%' }}
         />
       </div>
-      <div className="detection-subtitle">{t('detection.roi.insets', 'Inset margins (px)')}</div>
-      <div className="detection-row-2col">
-        <CompactInput size="small" addonBefore="L" value={roi.x} onChange={(e) => set({ x: Math.max(0, Number(e.target.value) | 0) })} />
-        <CompactInput size="small" addonBefore="T" value={roi.y} onChange={(e) => set({ y: Math.max(0, Number(e.target.value) | 0) })} />
-      </div>
-      <div className="detection-row-2col" style={{ marginTop: 4 }}>
-        <CompactInput size="small" addonBefore="R" value={roi.w} onChange={(e) => set({ w: Math.max(0, Number(e.target.value) | 0) })} />
-        <CompactInput size="small" addonBefore="B" value={roi.h} onChange={(e) => set({ h: Math.max(0, Number(e.target.value) | 0) })} />
-      </div>
+      <div className="detection-subtitle">{t('detection.roi.offsetMode', 'Offset mode')}</div>
+      <CompactSegmented
+        value={mode}
+        onChange={(v) => set({ offsetMode: v as RoiOffsetMode })}
+        options={[
+          { value: 'inset', label: t('detection.roi.offsetMode.inset', 'Inset') },
+          { value: 'relative', label: t('detection.roi.offsetMode.relative', 'Relative') },
+        ]}
+      />
+      {mode === 'inset' ? (
+        <>
+          <div className="detection-subtitle">{t('detection.roi.insets', 'Inset margins (px)')}</div>
+          <div className="detection-row-2col">
+            <CompactInput size="small" addonBefore="L" value={roi.x} onChange={(e) => set({ x: Math.max(0, Number(e.target.value) | 0) })} />
+            <CompactInput size="small" addonBefore="T" value={roi.y} onChange={(e) => set({ y: Math.max(0, Number(e.target.value) | 0) })} />
+          </div>
+          <div className="detection-row-2col" style={{ marginTop: 4 }}>
+            <CompactInput size="small" addonBefore="R" value={roi.w} onChange={(e) => set({ w: Math.max(0, Number(e.target.value) | 0) })} />
+            <CompactInput size="small" addonBefore="B" value={roi.h} onChange={(e) => set({ h: Math.max(0, Number(e.target.value) | 0) })} />
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="detection-subtitle">{t('detection.roi.offset', 'Offset (from parent top-left)')}</div>
+          <div className="detection-row-2col">
+            <CompactInput size="small" addonBefore="dx" value={roi.x} onChange={(e) => set({ x: Number(e.target.value) | 0 })} />
+            <CompactInput size="small" addonBefore="dy" value={roi.y} onChange={(e) => set({ y: Number(e.target.value) | 0 })} />
+          </div>
+          <div className="detection-subtitle" style={{ marginTop: 4 }}>{t('detection.roi.size', 'Size')}</div>
+          <div className="detection-row-2col">
+            <CompactInput size="small" addonBefore="w" value={roi.w} onChange={(e) => set({ w: Math.max(0, Number(e.target.value) | 0) })} />
+            <CompactInput size="small" addonBefore="h" value={roi.h} onChange={(e) => set({ h: Math.max(0, Number(e.target.value) | 0) })} />
+          </div>
+        </>
+      )}
     </>
   );
 };
@@ -358,13 +422,11 @@ const TrackerForm: React.FC<{ opt: TrackerOptions; onChange: (o: TrackerOptions)
         />
       </div>
       <div className="detection-field">
-        <span className="detection-field__label">
-          {t('detection.tracker.initBbox', 'Init bbox')}: ({opt.initX}, {opt.initY}) {opt.initW}×{opt.initH}
-        </span>
-      </div>
-      <div className="detection-field">
         <span className="detection-field__label">{t('detection.tracker.reacquire', 'Re-acquire on lost')}</span>
         <CompactSwitch checked={opt.reacquireOnLost} onChange={(c) => onChange({ ...opt, reacquireOnLost: c })} />
+      </div>
+      <div className="detection-section__hint">
+        {t('detection.tracker.modelHint', 'Init frame + bbox live in the trained model — re-train from the Detections tab to change them.')}
       </div>
     </div>
   );
@@ -378,10 +440,8 @@ const PatternForm: React.FC<{ opt: PatternOptions; onChange: (o: PatternOptions)
       <div className="detection-section__hint">
         {t('detection.pattern.hint', 'Background-invariant feature match. Trainer extracts ORB keypoints from positive samples; runtime matches them in the current frame. Re-train to refresh the model.')}
       </div>
-      <div className="detection-field">
-        <span className="detection-field__label">
-          {t('detection.pattern.modelInfo', 'Model')}: {opt.keypointCount} keypoints, {opt.templateWidth}×{opt.templateHeight}
-        </span>
+      <div className="detection-section__hint">
+        {t('detection.pattern.modelHint', 'Descriptors + reference patch live in the trained model — re-train from the Detections tab to refresh them.')}
       </div>
       <div className="detection-field">
         <span className="detection-field__label">{t('detection.pattern.minConfidence', 'Min confidence')}: {opt.minConfidence.toFixed(2)}</span>
@@ -543,6 +603,40 @@ const BarForm: React.FC<{ opt: BarOptions; siblings: DetectionDefinition[]; onCh
           <Slider min={0} max={50} step={1} value={Math.round(opt.insetRightPct * 100)}
             onChange={(v) => onChange({ ...opt, insetRightPct: v / 100 })} />
         </div>
+      </div>
+    </div>
+  );
+};
+
+const CompositeForm: React.FC<{ opt: CompositeOptions; siblings: DetectionDefinition[]; onChange: (o: CompositeOptions) => void }> = ({ opt, siblings, onChange }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="detection-section">
+      <div className="detection-section__title">{t('detection.train.compose.title', 'Compose other detections')}</div>
+      <div className="detection-section__hint">
+        {t('detection.train.compose.hint', 'Pick the operand detections and choose AND (all must match) or OR (any matches).')}
+      </div>
+      <div className="detection-field">
+        <span className="detection-field__label">{t('detection.train.compose.op', 'Operator')}</span>
+        <CompactSegmented
+          value={opt.op}
+          onChange={(v) => onChange({ ...opt, op: v as CompositeOp })}
+          options={[
+            { value: 'and', label: t('detection.train.compose.opAnd', 'AND — all must match') },
+            { value: 'or', label: t('detection.train.compose.opOr', 'OR — any one matches') },
+          ]}
+        />
+      </div>
+      <div className="detection-field">
+        <span className="detection-field__label">{t('detection.train.compose.operands', 'Operands')}</span>
+        <CompactSelect
+          mode="multiple"
+          value={opt.detectionIds}
+          onChange={(v) => onChange({ ...opt, detectionIds: v as string[] })}
+          options={siblings.map((s) => ({ value: s.id, label: `${s.name || s.id} (${s.kind})` }))}
+          placeholder={t('detection.train.compose.needsOperands', 'Add at least one operand detection.') as string}
+          style={{ width: '100%' }}
+        />
       </div>
     </div>
   );

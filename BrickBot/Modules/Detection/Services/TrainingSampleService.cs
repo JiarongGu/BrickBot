@@ -1,3 +1,4 @@
+using System.Text.Json;
 using BrickBot.Modules.Core.Exceptions;
 using BrickBot.Modules.Core.Helpers;
 using BrickBot.Modules.Core.Services;
@@ -12,15 +13,18 @@ public sealed class TrainingSampleService : ITrainingSampleService
     private readonly ITrainingSampleRepository _repository;
     private readonly IGlobalPathService _globalPaths;
     private readonly ILogHelper _logger;
+    private readonly JsonSerializerOptions _json;
 
     public TrainingSampleService(
         ITrainingSampleRepository repository,
         IGlobalPathService globalPaths,
-        ILogHelper logger)
+        ILogHelper logger,
+        JsonSerializerOptions json)
     {
         _repository = repository;
         _globalPaths = globalPaths;
         _logger = logger;
+        _json = json;
     }
 
     public async Task<IReadOnlyList<TrainingSampleInfo>> SaveBatchAsync(
@@ -33,7 +37,6 @@ public sealed class TrainingSampleService : ITrainingSampleService
 
         if (replaceExisting)
         {
-            // Delete prior samples + their image files. Wizard finished → start fresh.
             var prior = await _repository.ListByDetectionAsync(profileId, detectionId).ConfigureAwait(false);
             foreach (var p in prior)
             {
@@ -67,6 +70,8 @@ public sealed class TrainingSampleService : ITrainingSampleService
                 Width = mat.Width,
                 Height = mat.Height,
                 CapturedAt = DateTime.UtcNow,
+                ObjectBoxJson = s.ObjectBox is null ? null : JsonSerializer.Serialize(s.ObjectBox, _json),
+                IsInit = s.IsInit ? 1 : 0,
             };
 
             await File.WriteAllBytesAsync(GetImagePath(profileId, entity.Id), bytes).ConfigureAwait(false);
@@ -119,6 +124,14 @@ public sealed class TrainingSampleService : ITrainingSampleService
                 base64 = Convert.ToBase64String(bytes);
             }
         }
+
+        DetectionRoi? box = null;
+        if (!string.IsNullOrEmpty(e.ObjectBoxJson))
+        {
+            try { box = JsonSerializer.Deserialize<DetectionRoi>(e.ObjectBoxJson, _json); }
+            catch { /* ignore corrupt blob — sample renders without overlay */ }
+        }
+
         return new TrainingSampleInfo(
             Id: e.Id,
             DetectionId: e.DetectionId,
@@ -127,7 +140,9 @@ public sealed class TrainingSampleService : ITrainingSampleService
             Width: e.Width,
             Height: e.Height,
             CapturedAt: new DateTimeOffset(DateTime.SpecifyKind(e.CapturedAt, DateTimeKind.Utc)),
-            ImageBase64: base64);
+            ImageBase64: base64,
+            ObjectBox: box,
+            IsInit: e.IsInit != 0);
     }
 
     private string GetTrainingDirectory(string profileId) =>

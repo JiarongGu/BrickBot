@@ -164,48 +164,130 @@ Embedded scripting language is **JavaScript**, evaluated by [Jint](https://githu
 
 ## D-008: Detection-first authoring + stop conditions
 
-**Date:** 2026-04-28
-**Status:** Accepted
+**Date:** 2026-04-28 (v1), 2026-04-29 (v3 split)
+**Status:** Accepted (v3)
 
 Locked-in **4-layer automation workflow**. Features go on the right layer; do not collapse them.
 
 1. **Detection objects** — typed, named vision rules. Authored by the training wizard
-   (`DetectionsView` → `TrainingPanel`) and persisted in the per-profile SQLite (the `Detections`
-   table). Five kinds: `template`, `progressBar`, `colorPresence`, `effect`, `featureMatch`,
-   `region`. Scripts read by name: `detect.run('hp-bar').value`.
+   (`DetectionsView` → `TrainingPanel`). Five kinds: `tracker`, `pattern`, `text`, `bar`,
+   `composite`. Scripts read by name: `detect.run('hp-bar').value`.
 2. **Library scripts** — perception + state. Run detections, write to `ctx`, emit `brickbot`
-   events, register named `brickbot.action()`s. Loaded **lazily** via `require()` (the legacy
-   alphabetical pre-load is gone). Each library file is a CommonJS module emit.
+   events, register named `brickbot.action()`s. Loaded **lazily** via `require()`.
 3. **Main script** — orchestrator. Reads `ctx`, listens via `brickbot.on()`, declares
    `brickbot.when()` triggers, runs `brickbot.runForever({ tickMs, autoDetect })`. The Runner
    executes ONE main per Run.
 4. **Runner** — picks window + main, optionally configures stop conditions, drives the engine
    thread with cancellation.
 
-**Stop conditions** (`RunRequest.StopWhen`):
+### Detection v3 — 3-tier split (added 2026-04-29)
+
+The training output is split into **three** persisted shapes so each piece can evolve
+independently:
+
+| Shape | What | Where | Edited by |
+|---|---|---|---|
+| `DetectionDefinition` | Runtime config: kind, name, group, search ROI, output bindings, post-training tunables (lowe ratio, min confidence, line threshold, color, …). | `Detections` SQLite table. | Editor (`DetectionEditor`). |
+| `DetectionModel` | Compiled trainer output: descriptors blob, init frame PNG, reference patch PNG, training metadata (sample count, mean IoU, mean error). | `data/profiles/{id}/models/{detectionId}.model.json`. | Trainer only — re-train to refresh. |
+| `TrainingSample` | Raw labeled inputs WITH per-sample object box and tracker init flag. | `TrainingSamples` SQLite + `data/profiles/{id}/training/{id}.png`. | Wizard (`TrainingPanel`). |
+
+The runner needs both Definition + Model. Tracker/pattern require model artifacts at runtime
+(init frame, descriptors); text/bar can run from definition alone but the model file's
+existence is the "trained" badge for all kinds. The editor's live-preview path passes a
+candidate model directly via `IDetectionRunner.RunWithModel(...)`; saved-detection runs go
+through `Run(...)` which loads the model from `IDetectionModelStore`.
+
+**Per-sample object boxes** — every sample has its own `ObjectBox` annotation. Pattern positive
+samples can have the object at different screen positions across frames (the trainer crops at
+each positive's own box, not a single shared ROI — this was the v2 bug). Bar samples mark the
+bar at each fill level; the trainer median-aligns to derive the runtime bar bbox. Tracker
+designates exactly one sample as `IsInit = true`.
+
+**Wizard step shape is kind-dependent:**
+- `tracker` / `text` → 1 setup · 2 samples · 3 annotate · 4 save
+- `bar` → 1 setup · 2 samples · 3 annotate · 4 train · 5 save
+- `pattern` → 1 setup · 2 samples · 3 annotate · 4 search ROI · 5 train · 6 save
+- `composite` → 1 setup · 2 compose · 3 save
+
+**MaaFramework-inspired primitives (added 2026-04-29):**
+- **`composite` kind** — boolean AND/OR over other detections. `detect.runAll` runs them in a
+  3rd pass after their operands (independents → ROI-chained → composites).
+- **`Inverse` flag** — flips `result.found`. Saves `!detect.run(x).found` boilerplate.
+- **`MaxHit` cap** — auto-disable after N successful runs in the current Run.
+- **`DetectionRoi.OffsetMode = inset | relative`** when chained via `FromDetectionId`. Inset
+  (default, back-compat) shrinks the parent bbox; Relative anchors a sub-region at offset +
+  absolute size.
+- **`vision.waitStable(roi, opts)`** host primitive — block until the ROI's contents stop
+  changing for `stableMs` (mean abs diff ≤ `maxDiff`). Wait out menu animations before sampling.
+
+### Stop conditions
+
+`RunRequest.StopWhen`:
 - `TimeoutMs` — C# `Task.Delay` watchdog so even blocking scripts (long vision call) trip out.
 - `OnEvent` — JS-side `brickbot.on()` subscription requesting stop on any matching `emit()`.
 - `CtxKey + CtxOp + CtxValue` — JS-side per-tick predicate check inside `runForever`.
 
-All conditions OR-combined; manual Stop wins over everything. The first stop trigger wins so
+All conditions OR-combined; manual Stop wins over everything. First stop trigger wins so
 "user clicked Stop" never gets overwritten by a stale timeout completing right after.
-
 `RunnerState.StoppedReason` (`user / timeout / event / context / script / completed / faulted`)
-is surfaced in the UI so users know **why** a run ended. Scripts request shutdown with
-`brickbot.stop('reason')` (becomes `Script` reason) — useful for goal-driven flows.
+surfaces in the UI. Scripts request shutdown with `brickbot.stop('reason')` (becomes
+`Script` reason).
 
-**Why:** Without explicit stop conditions, the only way to end a run was to babysit it. Long
-training runs and goal-driven automations (e.g. "fish until you have 100 items") need the
-runner to self-terminate. The split between C# (timeout watchdog) and JS (event/ctx checks)
-keeps each kind on the layer that owns the data — JS owns the event bus and ctx, C# owns
-the cancellation token.
+**Why split:** Without explicit stop conditions the only way to end a run was to babysit it.
+The C# (timeout watchdog) / JS (event/ctx checks) split keeps each kind on the layer that
+owns the data — JS owns the event bus + ctx, C# owns the cancellation token.
 
-**How to apply:** New stop conditions → add a field to `StopWhenOptions`, plumb through
+**How to apply (new stop conditions):** Add a field to `StopWhenOptions`, plumb through
 `RunnerFacade.Start`, then either:
   - Implement in C# if it can be checked off the engine thread (timer, file-watch, etc.).
   - Implement in JS-side `runForever` if it depends on engine-thread state (ctx, events).
-Always set `host.RequestStop(reason, detail)` rather than calling `cts.Cancel()` directly so
-the surfaced reason matches the trigger.
+Always call `host.RequestStop(reason, detail)` rather than `cts.Cancel()` directly so the
+surfaced reason matches the trigger.
+
+**How to apply (new detection kind):** Add the enum value to `DetectionKind`, an options
+class to `DetectionDefinition`, the per-kind data class to `DetectionModel`, a `Run<Kind>`
+branch in `DetectionRunner`, a `Train<Kind>` branch in `DetectionTrainerService`, the wizard
+step shape, and an editor form. Mirror existing kinds — composite is the cleanest "no real
+training" reference, bar the cleanest "trains a model from samples" reference.
+
+---
+
+## D-009: Per-profile input delivery mode
+
+**Date:** 2026-04-29
+**Status:** Accepted
+
+`IInputService` carries a `Mode` property selectable per-profile via
+`ProfileConfiguration.Input.Mode`. RunnerService writes `Mode` + `TargetWindow` at run start
+from the active profile's config; existing scripts pick up the new mode without changes.
+
+| Mode | Mechanism | Use when |
+|---|---|---|
+| `SendInput` (default) | Win32 `SendInput` + `SetCursorPos`. Real cursor moves, real keys. Works against any focused window. | Any game that the user is actively foregrounding. Compat fallback. |
+| `PostMessage` | `PostMessage(hwnd, WM_KEYDOWN/WM_LBUTTONDOWN, ...)` directly to the target HWND. NO focus / cursor steal. | Games that accept WM_KEY* — many casual / adventure / non-FPS titles. Lets users do other things on the desktop while a run executes. |
+| `PostMessageWithPos` | Same as PostMessage but with a brief `SetWindowPos(SWP_NOMOVE|NOSIZE|NOZORDER|NOACTIVATE|NOSENDCHANGING|DEFERERASE)` immediately before each post. | Games that consult window state inside their input handler and would otherwise reject the WM_KEY event. |
+
+PostMessage modes convert screen coords back to client-relative via `ScreenToClient` before
+packing the lParam. Mouse messages use `MAKELPARAM(x, y)` with `MK_LBUTTON`/`MK_RBUTTON`/`MK_MBUTTON`
+in wParam. Keyboard lParam carries the scan code (via `MapVirtualKey`) plus the previous-key /
+transition bits required by the WM_KEYDOWN/UP contract. `MoveTo` is a no-op under PostMessage
+modes (no real cursor to move).
+
+**Why:** Many users want to keep using their PC while the bot runs. SendInput steals focus
+and the cursor; PostMessage is invisible to the user. Mode is per-profile because the right
+choice depends on the target game — no global toggle, no script-side logic.
+
+**How to apply (new input primitive):** Add a method to `IInputService` with the same Mode
+branching pattern: a `SendInput`-path inside `if (Mode == SendInput)` and a `PostMessage`-path
+that calls `WithMaybeWindowPos(hwnd, () => Native.PostMessage(...))`. Then expose via `HostApi`
+following the `pressKey` / `click` shape so scripts hit the correct mode automatically.
+
+**Caveats baked into comments:**
+- DirectInput / raw-input games (FPS titles) ignore `WM_KEY*` — fall back to `SendInput`.
+- `TypeText` under PostMessage uses `WM_CHAR` — works for chat/search boxes but doesn't carry
+  modifier state. Modifier-augmented typing still needs explicit `KeyDown(VK_SHIFT) + WM_CHAR
+  + KeyUp(VK_SHIFT)`.
+- PostMessage `MoveTo` is a no-op — games needing a real cursor don't work in this mode anyway.
 
 ---
 

@@ -2,6 +2,7 @@ import { BaseModuleService } from '@/shared/services/baseModuleService';
 import type {
   DetectionDefinition,
   DetectionKind,
+  DetectionModel,
   DetectionResult,
   NewTrainingSamplePayload,
   TrainingResult,
@@ -30,17 +31,24 @@ class DetectionService extends BaseModuleService {
   }
 
   /**
-   * Run an in-memory definition against a captured frame (PNG base64). Used by the editor's
-   * live preview so the user can iterate without saving.
+   * Run an in-memory definition against a captured frame. Pass `model` to preview a
+   * trained-but-not-yet-saved candidate (TrainingPanel diagnostics); omit it to use the
+   * persisted model on disk (live editor preview of a saved detection).
    */
-  test(profileId: string, definition: DetectionDefinition, frameBase64: string): Promise<DetectionResult> {
-    return this.send('TEST', { profileId, definition, frameBase64 });
+  test(
+    profileId: string,
+    definition: DetectionDefinition,
+    frameBase64: string,
+    model?: DetectionModel,
+  ): Promise<DetectionResult> {
+    return this.send('TEST', { profileId, definition, frameBase64, model });
   }
 
   /**
-   * Train a detection of the given kind from labeled samples. Returns the suggested
-   * definition + per-sample diagnostics. The suggested config can be inspected, edited,
-   * and then saved via `save()`.
+   * Train a detection of the given kind from labeled samples. Returns a paired
+   * (definition, model) — the definition holds runtime knobs, the model holds compiled
+   * artifacts. Both must be saved together (`save()` + `saveModel()`) for the runner to
+   * use the trained detection.
    */
   train(
     profileId: string,
@@ -60,9 +68,8 @@ class DetectionService extends BaseModuleService {
   }
 
   /**
-   * Persist labeled training samples for a detection. Images are written to
-   * data/profiles/{id}/training/{sampleId}.png and metadata to the TrainingSamples table.
-   * Pass replaceExisting=true (default) to drop prior samples for the detection first.
+   * Persist labeled training samples for a detection. Each sample carries its own object
+   * box (per-sample annotation). Pass replaceExisting=true (default) to drop prior samples.
    */
   saveSamples(
     profileId: string,
@@ -87,6 +94,26 @@ class DetectionService extends BaseModuleService {
 
   deleteSamplesForDetection(profileId: string, detectionId: string): Promise<{ success: boolean }> {
     return this.send('DELETE_SAMPLES_FOR_DETECTION', { profileId, detectionId });
+  }
+
+  // ============================================================
+  //  Detection model — compiled trainer output
+  // ============================================================
+
+  /** Load the trained model for a detection. Returns null when untrained. */
+  getModel(profileId: string, detectionId: string): Promise<DetectionModel | null> {
+    return this.send('GET_MODEL', { profileId, detectionId });
+  }
+
+  /** Persist a trained model. Overwrites any prior model for the same detection. */
+  saveModel(profileId: string, model: DetectionModel): Promise<DetectionModel> {
+    return this.send('SAVE_MODEL', { profileId, model });
+  }
+
+  /** Remove the trained model file. Definition + samples remain — useful to "untrain"
+   *  without losing config. */
+  deleteModel(profileId: string, detectionId: string): Promise<{ success: boolean }> {
+    return this.send('DELETE_MODEL', { profileId, detectionId });
   }
 }
 

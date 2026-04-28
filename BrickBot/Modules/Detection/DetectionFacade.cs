@@ -11,14 +11,26 @@ using OpenCvSharp;
 namespace BrickBot.Modules.Detection;
 
 /// <summary>
-/// IPC for the per-profile Detection store. Five message types:
-///   LIST   { profileId } → DetectionDefinition[]
-///   GET    { profileId, id } → DetectionDefinition | null
-///   SAVE   { profileId, definition } → DetectionDefinition (with id assigned if blank)
-///   DELETE { profileId, id } → { success }
-///   TEST   { profileId, definition, frameBase64 } → DetectionResult
-/// TEST runs the in-memory definition against a passed PNG so the editor can preview
-/// without persisting first.
+/// IPC for the per-profile Detection store. Three resources:
+///   • Definitions — runtime config rows in the Detections SQLite table.
+///   • Models — compiled trainer output JSON files at <c>data/profiles/{id}/models/</c>.
+///   • Training samples — labeled inputs (image + per-sample object box).
+///
+/// Routing:
+///   LIST                       { profileId }                                         → DetectionDefinition[]
+///   GET                        { profileId, id }                                     → DetectionDefinition | null
+///   SAVE                       { profileId, definition }                             → DetectionDefinition
+///   DELETE                     { profileId, id }                                     → { success }
+///   TEST                       { profileId, definition, model, frameBase64 }         → DetectionResult
+///   TRAIN                      { profileId, kind, samples, seed }                    → TrainingResult
+///   SUGGEST_ROIS               { frames, maxResults }                                → { suggestions }
+///   SAVE_SAMPLES               { profileId, detectionId, samples, replaceExisting }  → { samples }
+///   LIST_SAMPLES               { profileId, detectionId, includeImages }             → { samples }
+///   DELETE_SAMPLE              { profileId, sampleId }                               → { success }
+///   DELETE_SAMPLES_FOR_DETECTION { profileId, detectionId }                          → { success }
+///   GET_MODEL                  { profileId, detectionId }                            → DetectionModel | null
+///   SAVE_MODEL                 { profileId, model }                                  → DetectionModel
+///   DELETE_MODEL               { profileId, detectionId }                            → { success }
 /// </summary>
 public sealed class DetectionFacade : BaseFacade
 {
@@ -26,6 +38,7 @@ public sealed class DetectionFacade : BaseFacade
     private readonly IDetectionRunner _runner;
     private readonly IDetectionTrainerService _trainer;
     private readonly ITrainingSampleService _samples;
+    private readonly IDetectionModelStore _modelStore;
     private readonly IProfileEventBus _eventBus;
     private readonly PayloadHelper _payload;
 
@@ -34,6 +47,7 @@ public sealed class DetectionFacade : BaseFacade
         IDetectionRunner runner,
         IDetectionTrainerService trainer,
         ITrainingSampleService samples,
+        IDetectionModelStore modelStore,
         IProfileEventBus eventBus,
         PayloadHelper payload,
         ILogger<DetectionFacade> logger) : base(logger)
@@ -42,6 +56,7 @@ public sealed class DetectionFacade : BaseFacade
         _runner = runner;
         _trainer = trainer;
         _samples = samples;
+        _modelStore = modelStore;
         _eventBus = eventBus;
         _payload = payload;
     }
@@ -61,6 +76,9 @@ public sealed class DetectionFacade : BaseFacade
             "LIST_SAMPLES" => await ListSamplesAsync(request).ConfigureAwait(false),
             "DELETE_SAMPLE" => await DeleteSampleAsync(request).ConfigureAwait(false),
             "DELETE_SAMPLES_FOR_DETECTION" => await DeleteSamplesForDetectionAsync(request).ConfigureAwait(false),
+            "GET_MODEL" => GetModel(request),
+            "SAVE_MODEL" => await SaveModelAsync(request).ConfigureAwait(false),
+            "DELETE_MODEL" => DeleteModel(request),
             _ => throw new InvalidOperationException($"Unknown DETECTION request type: {request.Type}"),
         };
     }
@@ -68,7 +86,15 @@ public sealed class DetectionFacade : BaseFacade
     private object List(IpcRequest request)
     {
         var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
-        return new { detections = _files.List(profileId) };
+        var defs = _files.List(profileId);
+        // Annotate each with whether a model exists so the UI can show a "trained" badge
+        // without an extra round-trip per item. The annotation rides on the JSON wire
+        // shape — frontend treats unknown fields as optional.
+        var withTrained = defs.Select(d => new {
+            d.Id, d.Name, d.Kind, d.Group, d.Enabled, d.Roi, d.Tracker, d.Pattern, d.Text, d.Bar, d.Output,
+            hasModel = _modelStore.Exists(profileId, d.Id),
+        }).ToList();
+        return new { detections = withTrained };
     }
 
     private object? Get(IpcRequest request)
@@ -94,8 +120,8 @@ public sealed class DetectionFacade : BaseFacade
         var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
         var id = _payload.GetRequiredValue<string>(request.Payload, "id");
         _files.Delete(profileId, id);
-        // Cascade: drop training samples + their image files so deleting a detection doesn't
-        // leave orphan rows / disk garbage.
+        // Cascade: drop the model file + training samples + their image files.
+        _modelStore.Delete(profileId, id);
         await _samples.DeleteAllForDetectionAsync(profileId, id).ConfigureAwait(false);
         await _eventBus.EmitAsync(ModuleNames.DETECTION, DetectionEvents.DELETED,
             new { profileId, id }).ConfigureAwait(false);
@@ -107,9 +133,15 @@ public sealed class DetectionFacade : BaseFacade
         var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
         var def = _payload.GetRequiredValue<DetectionDefinition>(request.Payload, "definition");
         var frameBase64 = _payload.GetRequiredValue<string>(request.Payload, "frameBase64");
+        // Optional candidate model — caller passes one when previewing an unsaved training
+        // result (TrainingPanel diagnostics). When omitted, the runner pulls the persisted
+        // model from disk.
+        var model = _payload.GetOptionalValue<DetectionModel>(request.Payload, "model");
 
         using var frame = DecodeFrame(frameBase64);
-        return _runner.Run(profileId, def, frame);
+        return model is null
+            ? _runner.Run(profileId, def, frame)
+            : _runner.RunWithModel(profileId, def, model, frame);
     }
 
     private object Train(IpcRequest request)
@@ -161,6 +193,31 @@ public sealed class DetectionFacade : BaseFacade
         var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
         var detectionId = _payload.GetRequiredValue<string>(request.Payload, "detectionId");
         await _samples.DeleteAllForDetectionAsync(profileId, detectionId).ConfigureAwait(false);
+        return new { success = true };
+    }
+
+    private object? GetModel(IpcRequest request)
+    {
+        var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
+        var detectionId = _payload.GetRequiredValue<string>(request.Payload, "detectionId");
+        return _modelStore.Load(profileId, detectionId);
+    }
+
+    private async Task<object> SaveModelAsync(IpcRequest request)
+    {
+        var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
+        var model = _payload.GetRequiredValue<DetectionModel>(request.Payload, "model");
+        _modelStore.Save(profileId, model);
+        await _eventBus.EmitAsync(ModuleNames.DETECTION, DetectionEvents.MODEL_TRAINED,
+            new { profileId, detectionId = model.DetectionId, kind = model.Kind, version = model.Version }).ConfigureAwait(false);
+        return model;
+    }
+
+    private object DeleteModel(IpcRequest request)
+    {
+        var profileId = _payload.GetRequiredValue<string>(request.Payload, "profileId");
+        var detectionId = _payload.GetRequiredValue<string>(request.Payload, "detectionId");
+        _modelStore.Delete(profileId, detectionId);
         return new { success = true };
     }
 

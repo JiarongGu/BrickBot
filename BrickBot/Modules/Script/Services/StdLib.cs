@@ -124,6 +124,28 @@ internal static class StdLib
 
     /** Clear all baselines. */
     clearBaselines() { host.clearBaselines(); },
+
+    /**
+     * Block until an ROI's contents stop changing — useful for waiting out menu animations,
+     * fade-ins, transitions before running a fragile detection. Borrowed from MaaFramework's
+     * pre_wait_freezes / post_wait_freezes idea.
+     *
+     * @param {{x,y,w,h}} roi  Region to monitor.
+     * @param {{ stableMs?: number, maxDiff?: number, intervalMs?: number, timeoutMs?: number }=} opts
+     *   stableMs (default 250)  — ROI must hold steady for this many ms in a row.
+     *   maxDiff  (default 0.02) — per-channel mean abs diff threshold (0..1). Higher = looser.
+     *   intervalMs (default 50) — sampling cadence.
+     *   timeoutMs (default 5000) — give up after this many ms.
+     * @returns {boolean} true if stable, false on timeout.
+     */
+    waitStable(roi, opts) {
+      opts = opts || {};
+      const stableMs = (opts.stableMs != null) ? (opts.stableMs | 0) : 250;
+      const maxDiff = (opts.maxDiff != null) ? +opts.maxDiff : 0.02;
+      const intervalMs = (opts.intervalMs != null) ? (opts.intervalMs | 0) : 50;
+      const timeoutMs = (opts.timeoutMs != null) ? (opts.timeoutMs | 0) : 5000;
+      return host.waitStable(roi.x | 0, roi.y | 0, roi.w | 0, roi.h | 0, stableMs, maxDiff, intervalMs, timeoutMs);
+    },
   };
 
   globalThis.input = {
@@ -318,9 +340,10 @@ internal static class StdLib
     },
 
     /**
-     * Run every enabled definition. Two-pass to honor cross-detection ROI refs:
-     *   pass 1 — definitions whose ROI doesn't depend on another detection
-     *   pass 2 — definitions whose ROI uses fromDetectionId (parent already resolved)
+     * Run every enabled definition. Three-pass schedule to satisfy cross-detection deps:
+     *   pass 1 — independents (no ROI inheritance, not composite)
+     *   pass 2 — ROI-chained detections (parent already in lastResults from pass 1)
+     *   pass 3 — composites (operands already in lastResults from passes 1+2)
      * Cheap enough to call each tick; pair with `brickbot.runForever({ autoDetect: true })`.
      */
     runAll() {
@@ -340,14 +363,23 @@ internal static class StdLib
         }
       };
 
+      const isComposite = (def) => def.kind === 'composite';
+      const isRoiChained = (def) => def.roi && def.roi.fromDetectionId;
+
       // Pass 1 — independents.
       for (const def of defs) {
-        if (def.roi && def.roi.fromDetectionId) continue;
+        if (isComposite(def) || isRoiChained(def)) continue;
         runOne(def);
       }
-      // Pass 2 — dependents (parent already in lastResults from pass 1).
+      // Pass 2 — ROI-chained dependents.
       for (const def of defs) {
-        if (!ranIds[def.id] && def.roi && def.roi.fromDetectionId) runOne(def);
+        if (ranIds[def.id] || isComposite(def)) continue;
+        if (isRoiChained(def)) runOne(def);
+      }
+      // Pass 3 — composites (operands need to be in lastResults already).
+      for (const def of defs) {
+        if (ranIds[def.id]) continue;
+        if (isComposite(def)) runOne(def);
       }
       return out;
     },

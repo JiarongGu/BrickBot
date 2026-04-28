@@ -412,6 +412,55 @@
   color: var(--color-text-tertiary);
 }
 
+.diagnostic-thumb__iou {
+  color: var(--color-text-base);
+}
+
+/* Trained-model summary block — appears after training succeeds. */
+.training-model-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-base);
+}
+
+.training-model-summary__title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-base);
+}
+
+.training-model-summary__line {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-family: source-code-pro, Menlo, Monaco, Consolas, monospace;
+}
+
+.training-model-summary--untrained {
+  border-style: dashed;
+  border-color: var(--color-warning);
+}
+
+/* "Trained" badge on detection cards. */
+.detection-trained-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: var(--border-radius-sm);
+  background: var(--color-success-bg);
+  color: var(--color-success);
+  border: 1px solid var(--color-success);
+  font-weight: 500;
+}
+
+.detection-trained-badge--untrained {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  border-color: var(--color-warning);
+}
+
 /* Samples review pane — single 2-column grid for the entire samples step:
    LEFT  = options column (toolbar above the strip): mode picker, source-specific
            controls, sample list with filter pills + bulk actions.

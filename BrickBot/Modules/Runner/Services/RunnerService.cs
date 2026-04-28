@@ -2,6 +2,9 @@ using BrickBot.Modules.Capture.Services;
 using BrickBot.Modules.Core;
 using BrickBot.Modules.Core.Events;
 using BrickBot.Modules.Core.Exceptions;
+using BrickBot.Modules.Input.Models;
+using BrickBot.Modules.Input.Services;
+using BrickBot.Modules.Profile.Services;
 using BrickBot.Modules.Runner.Models;
 using BrickBot.Modules.Script.Services;
 using Microsoft.Extensions.Logging;
@@ -18,6 +21,8 @@ public sealed class RunnerService : IRunnerService
     private readonly IScriptDispatcher _dispatcher;
     private readonly IRunLog _log;
     private readonly IProfileEventBus _eventBus;
+    private readonly IProfileService _profileService;
+    private readonly IInputService _input;
     private readonly ILogger<RunnerService> _logger;
 
     private readonly object _lock = new();
@@ -34,6 +39,8 @@ public sealed class RunnerService : IRunnerService
         IScriptDispatcher dispatcher,
         IRunLog log,
         IProfileEventBus eventBus,
+        IProfileService profileService,
+        IInputService input,
         ILogger<RunnerService> logger)
     {
         _capture = capture;
@@ -43,6 +50,8 @@ public sealed class RunnerService : IRunnerService
         _dispatcher = dispatcher;
         _log = log;
         _eventBus = eventBus;
+        _profileService = profileService;
+        _input = input;
         _logger = logger;
     }
 
@@ -63,6 +72,22 @@ public sealed class RunnerService : IRunnerService
 
             var window = _windowFinder.GetByHandle(request.WindowHandle)
                 ?? throw new OperationException("RUNNER_WINDOW_NOT_FOUND");
+
+            // Apply per-profile input delivery mode. Singleton input service so the mode
+            // persists across calls — overwrite at every Start so switching profiles between
+            // runs picks up the right mode without leaking the previous profile's setting.
+            var inputMode = InputMode.SendInput;
+            try
+            {
+                var cfg = _profileService.GetProfileConfigurationAsync(request.ProfileId).GetAwaiter().GetResult();
+                inputMode = cfg?.Input?.Mode ?? InputMode.SendInput;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not load input config for profile {Profile}; defaulting to SendInput", request.ProfileId);
+            }
+            _input.Mode = inputMode;
+            _input.TargetWindow = window.Handle;
 
             // Resolve the compiled main BEFORE we mark the run as started so a missing
             // or uncompiled main fails fast. Libraries resolve lazily via require() so
@@ -97,7 +122,7 @@ public sealed class RunnerService : IRunnerService
             _dispatcher.Reset();
 
             UpdateState(new RunnerState(RunnerStatus.Running));
-            _log.Info($"Run started against \"{window.Title}\" ({window.Width}x{window.Height}) — main: {request.MainName}, libraries available: {availableLibraries.Count}");
+            _log.Info($"Run started against \"{window.Title}\" ({window.Width}x{window.Height}) — main: {request.MainName}, libraries available: {availableLibraries.Count}, input: {inputMode}");
             if (request.StopWhen is { } sw)
             {
                 _log.Info($"Stop conditions: " +

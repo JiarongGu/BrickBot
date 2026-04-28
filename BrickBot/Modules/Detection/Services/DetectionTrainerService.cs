@@ -9,13 +9,27 @@ using VisionFillDirection = BrickBot.Modules.Vision.Models.FillDirection;
 namespace BrickBot.Modules.Detection.Services;
 
 /// <summary>
-/// Train a <see cref="DetectionDefinition"/> from labeled <see cref="TrainingSample"/>s.
+/// v3 trainer. Reads PER-SAMPLE object boxes (not a single global ROI). Outputs a paired
+/// (<see cref="DetectionDefinition"/>, <see cref="DetectionModel"/>):
 ///
-/// Locked-in kinds (everything else has been deleted in the rewrite):
-///   • <see cref="DetectionKind.Tracker"/> — one frame + drag-bbox + algorithm.
-///   • <see cref="DetectionKind.Pattern"/> — multi-positive samples → ORB descriptor blob.
-///   • <see cref="DetectionKind.Text"/>    — one frame + drag-bbox + Tesseract config.
-///   • <see cref="DetectionKind.Bar"/>     — multi-fill samples → fill-color + direction.
+/// <list type="bullet">
+///   <item><b>Definition</b> = runtime knobs (algorithm choice, lowe ratio, fill direction, …).</item>
+///   <item><b>Model</b> = compiled artifacts (descriptors blob, init frame, ref patch) +
+///         training metadata (sample counts, mean error, mean IoU).</item>
+/// </list>
+///
+/// Per-kind contract:
+/// <list type="bullet">
+///   <item><b>Tracker</b> — exactly one sample with <see cref="TrainingSample.IsInit"/>=true
+///         and a non-null <see cref="TrainingSample.ObjectBox"/>. Other samples ignored.</item>
+///   <item><b>Pattern</b> — positives (label="true") need <see cref="TrainingSample.ObjectBox"/>
+///         each. Negatives (label="false") are scored against the trained blob to tune
+///         <see cref="PatternOptions.MinConfidence"/>.</item>
+///   <item><b>Text</b> — first sample with a box defines the OCR region.</item>
+///   <item><b>Bar</b> — each sample needs a box (location of the bar at that fill level) and
+///         a numeric label 0..1. Trainer median-aligns the boxes and derives fill color +
+///         direction + line threshold.</item>
+/// </list>
 /// </summary>
 public sealed class DetectionTrainerService : IDetectionTrainerService
 {
@@ -28,15 +42,12 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
 
     public TrainingResult Train(string profileId, DetectionKind kind, TrainingSample[] samples, DetectionDefinition? seed)
     {
+        // Composite is the one kind that doesn't need samples — it's just operand-id metadata.
+        if (kind == DetectionKind.Composite) return TrainComposite(seed);
+
         if (samples is null || samples.Length == 0)
         {
             throw new OperationException("DETECTION_TRAIN_NEEDS_SAMPLES", new() { ["min"] = "1" });
-        }
-
-        // Tracker + Text need only ONE init frame; Pattern + Bar need ≥2 labeled samples.
-        if ((kind == DetectionKind.Pattern || kind == DetectionKind.Bar) && samples.Length < 2)
-        {
-            throw new OperationException("DETECTION_TRAIN_NEEDS_SAMPLES", new() { ["min"] = "2" });
         }
 
         return kind switch
@@ -47,6 +58,46 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
             DetectionKind.Bar     => TrainBar(samples, seed),
             _ => throw new OperationException("DETECTION_TRAIN_KIND_UNSUPPORTED",
                 new() { ["kind"] = kind.ToString() }),
+        };
+    }
+
+    // ============================================================
+    //  Composite — boolean AND/OR over other detections (no samples)
+    // ============================================================
+
+    private TrainingResult TrainComposite(DetectionDefinition? seed)
+    {
+        var comp = seed?.Composite ?? new CompositeOptions();
+        if (comp.DetectionIds is null || comp.DetectionIds.Length == 0)
+        {
+            throw new OperationException("DETECTION_TRAIN_COMPOSITE_NEEDS_OPERANDS");
+        }
+
+        var definition = NewDefinition(seed, DetectionKind.Composite, "Composite", searchRoi: null,
+            d => d.Composite = comp);
+
+        var model = new DetectionModel
+        {
+            Id = definition.Id,
+            DetectionId = definition.Id,
+            Kind = DetectionKind.Composite,
+            Version = 1,
+            TrainedAt = DateTimeOffset.UtcNow,
+            SampleCount = 0,
+            Summary = $"composite {comp.Op.ToString().ToLowerInvariant()} over {comp.DetectionIds.Length} detections",
+            Composite = new CompositeModelData
+            {
+                Op = comp.Op,
+                DetectionIds = comp.DetectionIds,
+            },
+        };
+
+        return new TrainingResult
+        {
+            Definition = definition,
+            Model = model,
+            Diagnostics = Array.Empty<TrainingDiagnostic>(),
+            Summary = model.Summary,
         };
     }
 
@@ -109,46 +160,67 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
     }
 
     // ============================================================
-    //  Tracker — one frame + bbox + algo
+    //  Tracker — one init sample + bbox + algorithm
     // ============================================================
 
     private TrainingResult TrainTracker(TrainingSample[] samples, DetectionDefinition? seed)
     {
-        var trk = seed?.Tracker ?? new TrackerOptions();
-        if (trk.InitW <= 0 || trk.InitH <= 0)
+        // Pick the user-flagged init sample, or fall back to the first sample with a box.
+        var initIdx = Array.FindIndex(samples, s => s.IsInit && s.ObjectBox is not null);
+        if (initIdx < 0) initIdx = Array.FindIndex(samples, s => s.ObjectBox is not null);
+        if (initIdx < 0)
+        {
+            throw new OperationException("DETECTION_TRAIN_TRACKER_NEEDS_INIT");
+        }
+
+        var init = samples[initIdx];
+        var box = init.ObjectBox!;
+        if (box.W <= 0 || box.H <= 0)
         {
             throw new OperationException("DETECTION_TRAIN_TRACKER_NEEDS_BBOX");
         }
 
-        // Re-encode the first sample as PNG so the runtime decoder always sees a clean blob.
-        using var firstFrame = DecodeFrame(samples[0].ImageBase64);
-        var pngBytes = firstFrame.Image.ImEncode(".png");
-        trk.InitFramePng = Convert.ToBase64String(pngBytes);
+        using var initFrame = DecodeFrame(init.ImageBase64);
+        var pngBytes = initFrame.Image.ImEncode(".png");
+        var initFramePng = Convert.ToBase64String(pngBytes);
 
-        var suggested = ApplySeed(seed, DetectionKind.Tracker, "Trained Tracker", roi: null,
-            d => d.Tracker = trk);
+        var definition = NewDefinition(seed, DetectionKind.Tracker, "Trained Tracker", searchRoi: null,
+            d => d.Tracker = seed?.Tracker ?? new TrackerOptions());
+
+        var model = new DetectionModel
+        {
+            Id = definition.Id,
+            DetectionId = definition.Id,
+            Kind = DetectionKind.Tracker,
+            Version = 1,
+            TrainedAt = DateTimeOffset.UtcNow,
+            SampleCount = samples.Length,
+            PositiveCount = 1,
+            Summary = $"tracker {definition.Tracker!.Algorithm.ToString().ToLowerInvariant()} · " +
+                      $"init bbox ({box.X},{box.Y}) {box.W}×{box.H}",
+            Tracker = new TrackerModelData
+            {
+                InitFramePng = initFramePng,
+                InitX = box.X,
+                InitY = box.Y,
+                InitW = box.W,
+                InitH = box.H,
+            },
+        };
 
         return new TrainingResult
         {
-            Suggested = suggested,
+            Definition = definition,
+            Model = model,
             Diagnostics = Array.Empty<TrainingDiagnostic>(),
-            Summary = $"tracker {trk.Algorithm.ToString().ToLowerInvariant()} · " +
-                      $"init bbox ({trk.InitX},{trk.InitY}) {trk.InitW}×{trk.InitH} · " +
-                      $"reacquire-on-lost {(trk.ReacquireOnLost ? "on" : "off")}",
+            Summary = model.Summary,
         };
     }
 
     // ============================================================
-    //  Pattern — ORB descriptor extraction from positives
+    //  Pattern — ORB descriptor union from per-sample positive crops
     // ============================================================
 
-    /// <summary>
-    /// Pattern trainer: extract ORB keypoints + descriptors from each positive sample's ROI
-    /// crop, take the union of descriptors as the model. Negatives are scored against the
-    /// trained blob and inform the confidence threshold (we drop the worst-performing
-    /// descriptors when negatives match too many — but for v1 we just use all positives'
-    /// descriptors and tune the min-confidence cutoff).
-    /// </summary>
     private TrainingResult TrainPattern(TrainingSample[] samples, DetectionDefinition? seed)
     {
         var frames = samples.Select(s => DecodeFrame(s.ImageBase64)).ToList();
@@ -158,7 +230,13 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
             var negatives = new List<int>();
             for (var i = 0; i < samples.Length; i++)
             {
-                if (IsPositive(samples[i].Label)) positives.Add(i);
+                if (IsPositive(samples[i].Label))
+                {
+                    if (samples[i].ObjectBox is null)
+                        throw new OperationException("DETECTION_TRAIN_PATTERN_POSITIVE_NEEDS_BOX",
+                            new() { ["index"] = i.ToString() });
+                    positives.Add(i);
+                }
                 else negatives.Add(i);
             }
             if (positives.Count == 0)
@@ -166,22 +244,30 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
                 throw new OperationException("DETECTION_TRAIN_NEEDS_POSITIVES");
             }
 
-            var anchorIdx = positives[0];
-            var roi = ResolveRoi(samples[anchorIdx].Roi ?? seed?.Roi, frames[anchorIdx].Width, frames[anchorIdx].Height)
-                ?? throw new OperationException("DETECTION_TRAIN_PATTERN_NEEDS_ROI");
-
-            // Crop each positive at the trained ROI, extract ORB keypoints + descriptors,
-            // and concatenate into the trained model. Limit to ~150 descriptors per sample
-            // to keep the stored blob size reasonable.
+            // Extract descriptors from EACH positive's own object box. This is the key
+            // difference from v2: positives are no longer cropped at one shared ROI.
             const int maxKeypointsPerSample = 150;
             var allDescriptorRows = new List<Mat>();
+            int? refTemplateW = null, refTemplateH = null;
+            string? refPatchPng = null;
+
             foreach (var i in positives)
             {
-                var rect = ClampRect(frames[i].Image, roi);
+                var rect = ClampRect(frames[i].Image, ToRoi(samples[i].ObjectBox!, frames[i].Width, frames[i].Height));
                 if (rect.Width < 16 || rect.Height < 16) continue;
                 using var crop = new Mat(frames[i].Image, rect);
                 var (_, descriptors) = _vision.ExtractDescriptors(crop, maxKeypointsPerSample);
-                if (!descriptors.Empty()) allDescriptorRows.Add(descriptors);
+                if (!descriptors.Empty())
+                {
+                    allDescriptorRows.Add(descriptors);
+                    if (refTemplateW is null)
+                    {
+                        refTemplateW = rect.Width;
+                        refTemplateH = rect.Height;
+                        using var refClone = crop.Clone();
+                        refPatchPng = Convert.ToBase64String(refClone.ImEncode(".png"));
+                    }
+                }
                 else descriptors.Dispose();
             }
 
@@ -194,138 +280,204 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
             Cv2.VConcat(allDescriptorRows.ToArray(), trainedDescriptors);
             foreach (var m in allDescriptorRows) m.Dispose();
 
-            // Crop the anchor positive as the reference patch for re-training / overlay.
-            var anchorRect = ClampRect(frames[anchorIdx].Image, roi);
-            using var refPatch = new Mat(frames[anchorIdx].Image, anchorRect).Clone();
-            var refPng = Convert.ToBase64String(refPatch.ImEncode(".png"));
-
-            // Serialize descriptors as raw bytes (rows × 32). Binary blob in base64 keeps the
-            // detection JSON-portable.
-            // Descriptor width is 32 (ORB) or 64 (BRISK). Read it from the Mat instead of
-            // hard-coding so the trainer survives detector-algorithm swaps in VisionService.
             var descBytes = new byte[trainedDescriptors.Rows * trainedDescriptors.Cols];
             System.Runtime.InteropServices.Marshal.Copy(trainedDescriptors.Data, descBytes, 0, descBytes.Length);
             var descBase64 = Convert.ToBase64String(descBytes);
 
             var pat = seed?.Pattern ?? new PatternOptions();
-            pat.EmbeddedPng = refPng;
-            pat.Descriptors = descBase64;
-            pat.KeypointCount = trainedDescriptors.Rows;
-            pat.TemplateWidth = anchorRect.Width;
-            pat.TemplateHeight = anchorRect.Height;
 
-            // Quick negative scoring — count how many trained-keypoint matches each negative
-            // produces; tune min-confidence to be just above the worst negative.
-            var negMatchCounts = new List<double>();
-            foreach (var ni in negatives)
-            {
-                var match = _vision.MatchPattern(frames[ni], trainedDescriptors,
-                    new PatternMatchOptions(roi, pat.LoweRatio, 0.0,
-                        pat.MaxRuntimeKeypoints, pat.TemplateWidth, pat.TemplateHeight));
-                negMatchCounts.Add(match?.Confidence ?? 0.0);
-            }
-            var posMatchCounts = new List<double>();
+            // Score positives + negatives at the trained MinConfidence to tune the threshold
+            // halfway between worst-positive and best-negative when separable.
+            // Use the search ROI from seed.Roi (whole-frame default).
+            var searchRoi = seed?.Roi is { } sr ? new RegionOfInterest(sr.X, sr.Y, sr.W, sr.H) : (RegionOfInterest?)null;
+            var posScores = new List<double>();
+            var posBoxes = new List<PatternMatch?>();
             foreach (var pi in positives)
             {
                 var match = _vision.MatchPattern(frames[pi], trainedDescriptors,
-                    new PatternMatchOptions(roi, pat.LoweRatio, 0.0,
-                        pat.MaxRuntimeKeypoints, pat.TemplateWidth, pat.TemplateHeight));
-                posMatchCounts.Add(match?.Confidence ?? 0.0);
+                    new PatternMatchOptions(searchRoi, pat.LoweRatio, 0.0,
+                        pat.MaxRuntimeKeypoints, refTemplateW!.Value, refTemplateH!.Value));
+                posScores.Add(match?.Confidence ?? 0.0);
+                posBoxes.Add(match);
+            }
+            var negScores = new List<double>();
+            foreach (var ni in negatives)
+            {
+                var match = _vision.MatchPattern(frames[ni], trainedDescriptors,
+                    new PatternMatchOptions(searchRoi, pat.LoweRatio, 0.0,
+                        pat.MaxRuntimeKeypoints, refTemplateW!.Value, refTemplateH!.Value));
+                negScores.Add(match?.Confidence ?? 0.0);
             }
 
-            var posMin = posMatchCounts.Count > 0 ? posMatchCounts.Min() : 0;
-            var negMax = negMatchCounts.Count > 0 ? negMatchCounts.Max() : 0;
-            // Set MinConfidence between the worst positive and best negative when separable;
-            // fall back to 80 % of the worst positive when they overlap.
+            var posMin = posScores.Count > 0 ? posScores.Min() : 0;
+            var negMax = negScores.Count > 0 ? negScores.Max() : 0;
             pat.MinConfidence = posMin > negMax
                 ? Math.Round((posMin + negMax) / 2.0, 2)
                 : Math.Max(0.10, Math.Round(posMin * 0.80, 2));
 
-            var suggested = ApplySeed(seed, DetectionKind.Pattern, "Trained Pattern", roi,
+            var definition = NewDefinition(seed, DetectionKind.Pattern, "Trained Pattern", seed?.Roi,
                 d => d.Pattern = pat);
 
             var diagnostics = new TrainingDiagnostic[samples.Length];
+            var iouSum = 0.0;
+            var iouCount = 0;
+            var errorCount = 0;
             for (var i = 0; i < samples.Length; i++)
             {
                 var match = _vision.MatchPattern(frames[i], trainedDescriptors,
-                    new PatternMatchOptions(roi, pat.LoweRatio, 0.0,
-                        pat.MaxRuntimeKeypoints, pat.TemplateWidth, pat.TemplateHeight));
+                    new PatternMatchOptions(searchRoi, pat.LoweRatio, 0.0,
+                        pat.MaxRuntimeKeypoints, refTemplateW!.Value, refTemplateH!.Value));
                 var conf = match?.Confidence ?? 0.0;
                 var predicted = conf >= pat.MinConfidence;
                 var labelPos = IsPositive(samples[i].Label);
+
+                PredictedBox? predBox = match is null ? null
+                    : new PredictedBox { X = match.X, Y = match.Y, W = match.Width, H = match.Height };
+
+                double iou = 0;
+                if (labelPos && samples[i].ObjectBox is { } gt && match is not null)
+                {
+                    iou = ComputeIoU(gt, match);
+                    iouSum += iou; iouCount++;
+                }
+
+                var matched = labelPos == predicted;
+                if (!matched) errorCount++;
                 diagnostics[i] = new TrainingDiagnostic
                 {
                     Label = labelPos ? "true" : "false",
                     Predicted = $"{(predicted ? "true" : "false")} ({conf:0.00})",
-                    Error = labelPos == predicted ? 0.0 : 1.0,
+                    Error = matched ? 0.0 : 1.0,
+                    PredictedBox = predBox,
+                    IoU = iou,
                 };
             }
 
+            var meanIoU = iouCount > 0 ? iouSum / iouCount : 0.0;
+            var meanError = samples.Length > 0 ? (double)errorCount / samples.Length : 0.0;
+
+            var model = new DetectionModel
+            {
+                Id = definition.Id,
+                DetectionId = definition.Id,
+                Kind = DetectionKind.Pattern,
+                Version = 1,
+                TrainedAt = DateTimeOffset.UtcNow,
+                SampleCount = samples.Length,
+                PositiveCount = positives.Count,
+                NegativeCount = negatives.Count,
+                MeanError = meanError,
+                MeanIoU = meanIoU,
+                Summary = $"pattern {refTemplateW}×{refTemplateH} · {trainedDescriptors.Rows} keypoints · " +
+                          $"minConf {pat.MinConfidence:0.00} · pos≥{posMin:0.00} neg≤{negMax:0.00} · " +
+                          $"meanIoU {meanIoU:0.00}",
+                Pattern = new PatternModelData
+                {
+                    Descriptors = descBase64,
+                    KeypointCount = trainedDescriptors.Rows,
+                    TemplateWidth = refTemplateW!.Value,
+                    TemplateHeight = refTemplateH!.Value,
+                    EmbeddedPng = refPatchPng ?? "",
+                },
+            };
+
             return new TrainingResult
             {
-                Suggested = suggested,
+                Definition = definition,
+                Model = model,
                 Diagnostics = diagnostics,
-                Summary = $"pattern {pat.TemplateWidth}×{pat.TemplateHeight} · " +
-                          $"{pat.KeypointCount} keypoints · minConf {pat.MinConfidence:0.00} · " +
-                          $"pos≥{posMin:0.00} neg≤{negMax:0.00}",
+                Summary = model.Summary,
             };
         }
         finally { foreach (var f in frames) f.Dispose(); }
     }
 
     // ============================================================
-    //  Text — Tesseract (one frame + bbox + language)
+    //  Text — first sample with a box defines OCR region
     // ============================================================
 
     private TrainingResult TrainText(TrainingSample[] samples, DetectionDefinition? seed)
     {
+        var initIdx = Array.FindIndex(samples, s => s.ObjectBox is not null);
+        if (initIdx < 0)
+        {
+            throw new OperationException("DETECTION_TRAIN_TEXT_NEEDS_BOX");
+        }
+        var init = samples[initIdx];
+        var box = init.ObjectBox!;
+        if (box.W <= 0 || box.H <= 0)
+        {
+            throw new OperationException("DETECTION_TRAIN_TEXT_NEEDS_BOX");
+        }
+
+        using var initFrame = DecodeFrame(init.ImageBase64);
+        var rect = ClampRect(initFrame.Image, ToRoi(box, initFrame.Width, initFrame.Height));
+        using var crop = new Mat(initFrame.Image, rect);
+        var embedded = Convert.ToBase64String(crop.ImEncode(".png"));
+
         var txt = seed?.Text ?? new TextOptions();
-
-        // The runner does the actual OCR — training just packages the user's chosen ROI +
-        // language + page-segmentation mode. The first sample's ROI is what was selected.
-        var roi = samples[0].Roi is { } r
-            ? new RegionOfInterest(r.X, r.Y, r.W, r.H)
-            : seed?.Roi is { } sr
-                ? new RegionOfInterest(sr.X, sr.Y, sr.W, sr.H)
-                : throw new OperationException("DETECTION_TRAIN_TEXT_NEEDS_ROI");
-
-        var suggested = ApplySeed(seed, DetectionKind.Text, "Trained Text", roi,
+        // Use the box as the runtime ROI (the area to OCR). Text has no notion of search-vs-object
+        // so the box IS the ROI.
+        var searchRoi = new DetectionRoi { X = rect.X, Y = rect.Y, W = rect.Width, H = rect.Height };
+        var definition = NewDefinition(seed, DetectionKind.Text, "Trained Text", searchRoi,
             d => d.Text = txt);
+
+        var model = new DetectionModel
+        {
+            Id = definition.Id,
+            DetectionId = definition.Id,
+            Kind = DetectionKind.Text,
+            Version = 1,
+            TrainedAt = DateTimeOffset.UtcNow,
+            SampleCount = samples.Length,
+            PositiveCount = samples.Length,
+            Summary = $"text {rect.Width}×{rect.Height} · lang {txt.Language} · psm {txt.PageSegMode} · " +
+                      $"binarize {(txt.Binarize ? "on" : "off")} · upscale {txt.UpscaleFactor:0.0}× · minConf {txt.MinConfidence}",
+            Text = new TextModelData
+            {
+                BoxX = rect.X, BoxY = rect.Y, BoxW = rect.Width, BoxH = rect.Height,
+                EmbeddedPng = embedded,
+            },
+        };
 
         return new TrainingResult
         {
-            Suggested = suggested,
+            Definition = definition,
+            Model = model,
             Diagnostics = Array.Empty<TrainingDiagnostic>(),
-            Summary = $"text {roi.Width}×{roi.Height} · lang {txt.Language} · " +
-                      $"psm {txt.PageSegMode} · binarize {(txt.Binarize ? "on" : "off")} · " +
-                      $"upscale {txt.UpscaleFactor:0.0}× · minConf {txt.MinConfidence}",
+            Summary = model.Summary,
         };
     }
 
     // ============================================================
-    //  Bar — fill-color + direction inference from labeled samples
+    //  Bar — per-sample bar bbox + numeric fill labels
     // ============================================================
 
-    /// <summary>
-    /// Bar trainer: each sample is labeled with its expected fill ratio (0..1). Picks the
-    /// dominant fill color from the highest-fill sample, infers fill direction by comparing
-    /// fill measurements at hi/lo labels in each direction, and sweeps the line-fill threshold
-    /// to minimize prediction error.
-    /// </summary>
     private TrainingResult TrainBar(TrainingSample[] samples, DetectionDefinition? seed)
     {
         var frames = samples.Select(s => DecodeFrame(s.ImageBase64)).ToList();
         try
         {
+            // Need numeric labels and a per-sample box on every sample.
+            for (var i = 0; i < samples.Length; i++)
+            {
+                if (samples[i].ObjectBox is null)
+                    throw new OperationException("DETECTION_TRAIN_BAR_NEEDS_BOX",
+                        new() { ["index"] = i.ToString() });
+            }
             var labels = ParseNumericLabels(samples);
-            var hiIdx = Array.IndexOf(labels, labels.Max());
-            var roi = ResolveRoi(samples[hiIdx].Roi ?? seed?.Roi, frames[hiIdx].Width, frames[hiIdx].Height)
-                ?? throw new OperationException("DETECTION_TRAIN_BAR_NEEDS_ROI");
 
-            var color = MedianColor(frames[hiIdx], roi);
-            var tolerance = EstimateTolerance(frames, roi);
-            var direction = InferDirection(frames, labels, roi, color, tolerance);
-            var (lineThreshold, meanError) = SweepLineThreshold(frames, labels, roi, color, tolerance, direction);
+            // Median-aligned bar bbox across samples — robust to a single sample with a wonky box.
+            var boxes = samples.Select((s, i) => ToRoi(s.ObjectBox!, frames[i].Width, frames[i].Height)).ToArray();
+            var medianBox = MedianBox(boxes);
+
+            var hiIdx = Array.IndexOf(labels, labels.Max());
+            var hiBoxRect = ClampRect(frames[hiIdx].Image, ToRoi(samples[hiIdx].ObjectBox!, frames[hiIdx].Width, frames[hiIdx].Height));
+
+            var color = MedianColor(frames[hiIdx], hiBoxRect);
+            var tolerance = EstimateTolerance(frames, boxes);
+            var direction = InferDirection(frames, labels, boxes, color, tolerance);
+            var (lineThreshold, meanError) = SweepLineThreshold(frames, labels, boxes, color, tolerance, direction);
 
             var bar = seed?.Bar ?? new BarOptions();
             bar.FillColor = color;
@@ -333,31 +485,57 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
             bar.Direction = direction;
             bar.LineThreshold = lineThreshold;
 
-            var suggested = ApplySeed(seed, DetectionKind.Bar, "Trained Bar", roi,
+            var searchRoi = new DetectionRoi { X = medianBox.X, Y = medianBox.Y, W = medianBox.Width, H = medianBox.Height };
+            var definition = NewDefinition(seed, DetectionKind.Bar, "Trained Bar", searchRoi,
                 d => d.Bar = bar);
+
+            // Embed cropped highest-fill sample for the editor preview.
+            using var hiCrop = new Mat(frames[hiIdx].Image, hiBoxRect);
+            var embedded = Convert.ToBase64String(hiCrop.ImEncode(".png"));
 
             var diagnostics = new TrainingDiagnostic[samples.Length];
             for (var i = 0; i < samples.Length; i++)
             {
                 var sample = new ColorSample(color.R, color.G, color.B);
-                var fill = _vision.LinearFillRatio(frames[i], roi, sample, tolerance,
-                    ColorSpace.Rgb, direction, lineThreshold);
-                var error = Math.Abs(fill - labels[i]);
+                var rect = ClampRect(frames[i].Image, boxes[i]);
+                var fill = _vision.LinearFillRatio(frames[i],
+                    new RegionOfInterest(rect.X, rect.Y, rect.Width, rect.Height),
+                    sample, tolerance, ColorSpace.Rgb, direction, lineThreshold);
                 diagnostics[i] = new TrainingDiagnostic
                 {
                     Label = labels[i].ToString("0.00"),
                     Predicted = fill.ToString("0.00"),
-                    Error = error,
+                    Error = Math.Abs(fill - labels[i]),
+                    PredictedBox = new PredictedBox { X = rect.X, Y = rect.Y, W = rect.Width, H = rect.Height },
                 };
             }
 
+            var model = new DetectionModel
+            {
+                Id = definition.Id,
+                DetectionId = definition.Id,
+                Kind = DetectionKind.Bar,
+                Version = 1,
+                TrainedAt = DateTimeOffset.UtcNow,
+                SampleCount = samples.Length,
+                PositiveCount = samples.Length,
+                MeanError = meanError,
+                Summary = $"bar fill rgb({color.R},{color.G},{color.B}) ±{tolerance} · " +
+                          $"dir {direction} · lineThreshold {lineThreshold:0.00} · meanErr {meanError:0.000}",
+                Bar = new BarModelData
+                {
+                    BoxX = medianBox.X, BoxY = medianBox.Y, BoxW = medianBox.Width, BoxH = medianBox.Height,
+                    FillColor = color, Tolerance = tolerance, Direction = direction, LineThreshold = lineThreshold,
+                    EmbeddedPng = embedded,
+                },
+            };
+
             return new TrainingResult
             {
-                Suggested = suggested,
+                Definition = definition,
+                Model = model,
                 Diagnostics = diagnostics,
-                Summary = $"bar fill rgb({color.R},{color.G},{color.B}) ±{tolerance} · " +
-                          $"dir {direction.ToString()} · lineThreshold {lineThreshold:0.00} · " +
-                          $"mean error {meanError:0.000}",
+                Summary = model.Summary,
             };
         }
         finally { foreach (var f in frames) f.Dispose(); }
@@ -374,8 +552,8 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
         return l == "true" || l == "yes" || l == "1" || l == "+" || l == "positive";
     }
 
-    private DetectionDefinition ApplySeed(DetectionDefinition? seed, DetectionKind kind, string defaultName,
-        RegionOfInterest? roi, Action<DetectionDefinition> apply)
+    private DetectionDefinition NewDefinition(DetectionDefinition? seed, DetectionKind kind, string defaultName,
+        DetectionRoi? searchRoi, Action<DetectionDefinition> apply)
     {
         var def = seed is null
             ? new DetectionDefinition
@@ -384,7 +562,7 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
                 Name = defaultName,
                 Kind = kind,
                 Enabled = true,
-                Roi = roi is not null ? ToDetectionRoi(roi) : null,
+                Roi = searchRoi,
                 Output = new DetectionOutput { EventOnChangeOnly = true },
             }
             : new DetectionDefinition
@@ -394,7 +572,7 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
                 Kind = kind,
                 Group = seed.Group,
                 Enabled = seed.Enabled,
-                Roi = seed.Roi ?? (roi is not null ? ToDetectionRoi(roi) : null),
+                Roi = seed.Roi ?? searchRoi,
                 Output = seed.Output,
             };
         apply(def);
@@ -421,9 +599,46 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
         return new CaptureFrame(mat, 0, DateTimeOffset.UtcNow);
     }
 
-    private static RgbColor MedianColor(CaptureFrame frame, RegionOfInterest roi)
+    private static RegionOfInterest ToRoi(DetectionRoi r, int frameW, int frameH)
     {
-        var rect = ClampRect(frame.Image, roi);
+        var w = r.W <= 0 ? frameW : r.W;
+        var h = r.H <= 0 ? frameH : r.H;
+        return new RegionOfInterest(r.X, r.Y, w, h);
+    }
+
+    private static Rect ClampRect(Mat haystack, RegionOfInterest roi)
+    {
+        var x = Math.Clamp(roi.X, 0, haystack.Width);
+        var y = Math.Clamp(roi.Y, 0, haystack.Height);
+        var w = Math.Clamp(roi.Width, 0, haystack.Width - x);
+        var h = Math.Clamp(roi.Height, 0, haystack.Height - y);
+        return new Rect(x, y, w, h);
+    }
+
+    private static double ComputeIoU(DetectionRoi gt, PatternMatch match)
+    {
+        var gx1 = gt.X; var gy1 = gt.Y; var gx2 = gt.X + gt.W; var gy2 = gt.Y + gt.H;
+        var mx1 = match.X; var my1 = match.Y; var mx2 = match.X + match.Width; var my2 = match.Y + match.Height;
+        var ix1 = Math.Max(gx1, mx1); var iy1 = Math.Max(gy1, my1);
+        var ix2 = Math.Min(gx2, mx2); var iy2 = Math.Min(gy2, my2);
+        var inter = Math.Max(0, ix2 - ix1) * Math.Max(0, iy2 - iy1);
+        var union = (gt.W * gt.H) + (match.Width * match.Height) - inter;
+        return union <= 0 ? 0 : (double)inter / union;
+    }
+
+    private static Rect MedianBox(RegionOfInterest[] boxes)
+    {
+        if (boxes.Length == 0) return new Rect(0, 0, 0, 0);
+        var xs = boxes.Select(b => b.X).OrderBy(v => v).ToArray();
+        var ys = boxes.Select(b => b.Y).OrderBy(v => v).ToArray();
+        var ws = boxes.Select(b => b.Width).OrderBy(v => v).ToArray();
+        var hs = boxes.Select(b => b.Height).OrderBy(v => v).ToArray();
+        var m = boxes.Length / 2;
+        return new Rect(xs[m], ys[m], ws[m], hs[m]);
+    }
+
+    private static RgbColor MedianColor(CaptureFrame frame, Rect rect)
+    {
         using var crop = new Mat(frame.Image, rect);
         using var gray = new Mat();
         Cv2.CvtColor(crop, gray, ColorConversionCodes.BGR2GRAY);
@@ -443,11 +658,11 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
         return new RgbColor(rs[rs.Length / 2], gs[gs.Length / 2], bs[bs.Length / 2]);
     }
 
-    private static int EstimateTolerance(List<CaptureFrame> frames, RegionOfInterest roi)
+    private static int EstimateTolerance(List<CaptureFrame> frames, RegionOfInterest[] boxes)
     {
-        var means = frames.Select(f =>
+        var means = frames.Select((f, i) =>
         {
-            var rect = ClampRect(f.Image, roi);
+            var rect = ClampRect(f.Image, boxes[i]);
             using var crop = new Mat(f.Image, rect);
             var m = Cv2.Mean(crop);
             return (R: (int)m.Val2, G: (int)m.Val1, B: (int)m.Val0);
@@ -461,7 +676,7 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
     }
 
     private VisionFillDirection InferDirection(
-        List<CaptureFrame> frames, double[] labels, RegionOfInterest roi, RgbColor color, int tolerance)
+        List<CaptureFrame> frames, double[] labels, RegionOfInterest[] boxes, RgbColor color, int tolerance)
     {
         if (frames.Count < 2) return VisionFillDirection.LeftToRight;
         var hi = Array.IndexOf(labels, labels.Max());
@@ -478,8 +693,8 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
         var bestScore = double.NegativeInfinity;
         foreach (var dir in directions)
         {
-            var hiFill = _vision.LinearFillRatio(frames[hi], roi, sample, tolerance, ColorSpace.Rgb, dir, 0.4);
-            var loFill = _vision.LinearFillRatio(frames[lo], roi, sample, tolerance, ColorSpace.Rgb, dir, 0.4);
+            var hiFill = _vision.LinearFillRatio(frames[hi], boxes[hi], sample, tolerance, ColorSpace.Rgb, dir, 0.4);
+            var loFill = _vision.LinearFillRatio(frames[lo], boxes[lo], sample, tolerance, ColorSpace.Rgb, dir, 0.4);
             var score = (hiFill - loFill) * Math.Sign(labelDelta);
             if (score > bestScore) { bestScore = score; best = dir; }
         }
@@ -487,7 +702,7 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
     }
 
     private (double threshold, double meanError) SweepLineThreshold(
-        List<CaptureFrame> frames, double[] labels, RegionOfInterest roi, RgbColor color, int tolerance,
+        List<CaptureFrame> frames, double[] labels, RegionOfInterest[] boxes, RgbColor color, int tolerance,
         VisionFillDirection direction)
     {
         var sample = new ColorSample(color.R, color.G, color.B);
@@ -498,32 +713,12 @@ public sealed class DetectionTrainerService : IDetectionTrainerService
             var totalErr = 0.0;
             for (var i = 0; i < frames.Count; i++)
             {
-                var fill = _vision.LinearFillRatio(frames[i], roi, sample, tolerance, ColorSpace.Rgb, direction, t);
+                var fill = _vision.LinearFillRatio(frames[i], boxes[i], sample, tolerance, ColorSpace.Rgb, direction, t);
                 totalErr += Math.Abs(fill - labels[i]);
             }
             var meanErr = totalErr / frames.Count;
             if (meanErr < bestErr) { bestErr = meanErr; bestThreshold = t; }
         }
         return (bestThreshold, bestErr);
-    }
-
-    private static RegionOfInterest? ResolveRoi(DetectionRoi? r, int frameW, int frameH)
-    {
-        if (r is null) return null;
-        var w = r.W <= 0 ? frameW : r.W;
-        var h = r.H <= 0 ? frameH : r.H;
-        return new RegionOfInterest(r.X, r.Y, w, h);
-    }
-
-    private static DetectionRoi ToDetectionRoi(RegionOfInterest r) =>
-        new() { X = r.X, Y = r.Y, W = r.Width, H = r.Height };
-
-    private static Rect ClampRect(Mat haystack, RegionOfInterest roi)
-    {
-        var x = Math.Clamp(roi.X, 0, haystack.Width);
-        var y = Math.Clamp(roi.Y, 0, haystack.Height);
-        var w = Math.Clamp(roi.Width, 0, haystack.Width - x);
-        var h = Math.Clamp(roi.Height, 0, haystack.Height - y);
-        return new Rect(x, y, w, h);
     }
 }

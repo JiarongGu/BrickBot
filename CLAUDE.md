@@ -49,7 +49,7 @@ Services → Business logic + event emission
 - Backend: .NET 10 WinForms + WebView2, Microsoft.Extensions.DependencyInjection, SQLite + Dapper + FluentMigrator, Costura.Fody, Microsoft.Extensions.Caching.Memory, OpenCvSharp4 (vision), Jint (JavaScript scripting), Windows.Graphics.Capture (high-FPS) with BitBlt fallback.
 - Frontend: React 19 + TypeScript + Vite + Ant Design 6 + Zustand (immer) + react-i18next + Monaco editor (script editing).
 
-**Module list**: `Capture`, `Vision`, `Input`, `Template`, `Script`, `Runner`, `Profile`, `Setting`.
+**Module list**: `Capture`, `Vision`, `Input`, `Template`, `Detection`, `Recording`, `Script`, `Runner`, `Profile`, `Setting`.
 
 **Error handling** — throw `OperationException("ERROR_CODE", params)`. Add message to BOTH `Languages/en.json` AND `Languages/cn.json`.
 
@@ -158,6 +158,14 @@ trips even when the script blocks on a long vision call.
 New host primitive → method on `HostApi.cs` + wrapper in `StdLib.InitScript` + typing in
 `Modules/Script/Resources/brickbot.d.ts`. Never expose `__host` directly to user scripts.
 
+**Host primitives worth knowing**:
+- `vision.waitStable(roi, opts)` — block until the ROI's pixels stop changing for `stableMs`.
+  Use to wait out animations/transitions before sampling fragile detections.
+- `detect.run(name)` — run one detection by id/name; result includes `found`, `match`,
+  `value`, `text`, `confidence`. The `found` flag respects `Definition.Inverse`.
+- `detect.runAll()` — runs every enabled detection in 3 passes (independents → ROI-chained
+  → composites). Pair with `brickbot.runForever({ autoDetect: true })`.
+
 ---
 
 ## 7. UI Tabs
@@ -165,7 +173,7 @@ New host primitive → method on `HostApi.cs` + wrapper in `StdLib.InitScript` +
 Top-level navigation (`App.tsx`):
 - **Runner** — pick window + main script, configure stop conditions, start/stop, log.
 - **Scripts** — Main/Library file browser + Monaco editor. Toolbar **Capture** button opens the Capture panel as a slide-in for mid-edit template authoring.
-- **Detections** — list / filter / edit / re-train detections; "Train new" launches the 5-step wizard. Detections are self-contained — embed their own template bytes; no reliance on the Templates table.
+- **Detections** — list / filter / edit / re-train detections; "Train new" launches the wizard (3–6 steps depending on kind). Each saved detection has 3 persisted shapes: a `DetectionDefinition` (config) in SQLite, a `DetectionModel` (trained artifacts) JSON file under `data/profiles/{id}/models/`, and the raw `TrainingSamples` (with per-sample object boxes) for re-training. The "Trained" badge shows when the model file exists.
 - **Recordings** — record gameplay once, reuse the frames across many detection trainings. Each recording = named multi-frame capture with metadata; training wizard's Samples step has a "From recording" mode that pulls frames into the labels list.
 - **Tools** — grid of utility cards, each opens in a `<SlideInScreen>`. Today: Profiles, Captures, Actions.
 - **Settings** — theme / language / log-level / window-state-reset (global).

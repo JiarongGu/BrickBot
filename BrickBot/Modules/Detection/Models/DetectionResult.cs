@@ -13,7 +13,7 @@ public sealed class DetectionResult
     public string id { get; init; } = "";
     public string name { get; init; } = "";
     public DetectionKind kind { get; init; }
-    public bool found { get; init; }
+    public bool found { get; set; }
     public double durationMs { get; init; }
 
     /// <summary>0..1 fill ratio for <c>bar</c>.</summary>

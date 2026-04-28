@@ -11,4 +11,6 @@ public sealed record TrainingSampleInfo(
     int Width,
     int Height,
     DateTimeOffset CapturedAt,
-    string? ImageBase64);
+    string? ImageBase64,
+    DetectionRoi? ObjectBox,
+    bool IsInit);

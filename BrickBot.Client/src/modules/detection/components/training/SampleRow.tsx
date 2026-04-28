@@ -1,5 +1,5 @@
 import React from 'react';
-import { Checkbox } from 'antd';
+import { Checkbox, Tooltip } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import classNames from 'classnames';
 import { CompactDangerButton } from '@/shared/components/compact';
@@ -8,12 +8,9 @@ import { CompactDangerButton } from '@/shared/components/compact';
  * One row in the samples strip. `React.memo`'d so flipping a single row's
  * `selected` / `active` / `label` state doesn't re-render every sibling.
  *
- * The parent passes stable callbacks (via `useEventCallback`) so memo's
- * prop-equality check actually short-circuits — without that, every parent
- * render hands out fresh closures and memo re-renders all rows anyway.
- *
- * `onClick` receives the raw event so the parent can read modifier keys
- * (Ctrl/Shift) for multi-select; remove + toggle stop-propagation locally.
+ * Badges:
+ *   • green dot   → sample has an object-box annotation
+ *   • blue dot    → sample is the tracker init frame
  */
 export interface SampleRowProps {
   id: string;
@@ -22,13 +19,15 @@ export interface SampleRowProps {
   label: string;
   isActive: boolean;
   isSelected: boolean;
+  hasBox: boolean;
+  isInit: boolean;
   onClick: (e: React.MouseEvent, index: number, id: string) => void;
   onToggle: (id: string) => void;
   onRemove: (index: number) => void;
 }
 
 export const SampleRow = React.memo(function SampleRow(props: SampleRowProps) {
-  const { id, index, imageBase64, label, isActive, isSelected, onClick, onToggle, onRemove } = props;
+  const { id, index, imageBase64, label, isActive, isSelected, hasBox, isInit, onClick, onToggle, onRemove } = props;
   const isUnlabeled = !label.trim();
   return (
     <div
@@ -46,7 +45,19 @@ export const SampleRow = React.memo(function SampleRow(props: SampleRowProps) {
       />
       <img className="samples-review__thumb" src={`data:image/png;base64,${imageBase64}`} alt="" />
       <div className="samples-review__row-info">
-        <div className="samples-review__row-name">#{index + 1}</div>
+        <div className="samples-review__row-name">
+          #{index + 1}
+          {isInit && (
+            <Tooltip title="Tracker init frame">
+              <span className="samples-review__row-badge samples-review__row-badge--init" />
+            </Tooltip>
+          )}
+          {hasBox && !isInit && (
+            <Tooltip title="Annotated">
+              <span className="samples-review__row-badge" />
+            </Tooltip>
+          )}
+        </div>
         <div className="samples-review__row-label">{label || '—'}</div>
       </div>
       <CompactDangerButton

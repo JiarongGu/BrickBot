@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ColorPicker,
   Col,
@@ -27,6 +27,7 @@ import {
   CompactDangerButton,
   CompactInput,
   CompactPrimaryButton,
+  CompactSelect,
   CompactSpace,
   CompactTextArea,
 } from '@/shared/components/compact';
@@ -40,7 +41,8 @@ import {
   switchProfile,
   updateProfile,
 } from '../operations/profileOperations';
-import type { Profile } from '../types';
+import { profileService } from '../services/profileService';
+import type { InputMode, Profile, ProfileConfiguration } from '../types';
 import './ProfilePanel.css';
 
 /**
@@ -224,6 +226,23 @@ const CreateProfileDialog: React.FC<{ open: boolean; onClose: () => void }> = ({
 const EditProfileDialog: React.FC<{ target: Profile; onClose: () => void }> = ({ target, onClose }) => {
   const { t } = useTranslation();
   const [form] = Form.useForm();
+  const [config, setConfig] = useState<ProfileConfiguration | null>(null);
+  const [inputMode, setInputMode] = useState<InputMode>('sendInput');
+
+  // Load the profile configuration alongside identity fields so the dialog can edit
+  // both the user-facing identity (name/color/etc.) and runtime settings (input mode).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cfg = await profileService.getConfig(target.id);
+        if (cancelled) return;
+        setConfig(cfg);
+        if (cfg?.input?.mode) setInputMode(cfg.input.mode);
+      } catch { /* keep defaults */ }
+    })();
+    return () => { cancelled = true; };
+  }, [target.id]);
 
   return (
     <FormDialog
@@ -242,6 +261,19 @@ const EditProfileDialog: React.FC<{ target: Profile; onClose: () => void }> = ({
           color: values.color?.toHexString?.() ?? values.color,
           gameName: values.gameName,
         });
+        // Persist runtime config when changed. ProfileConfiguration is a single blob —
+        // we read the existing config (or build a minimal one) and overwrite the input
+        // section so other fields (capture, script, windowMatch) survive.
+        if (config && config.input?.mode !== inputMode) {
+          try {
+            await profileService.updateConfig({
+              ...config,
+              input: { mode: inputMode },
+            });
+          } catch (e) {
+            message.warning(String(e));
+          }
+        }
         onClose();
       }}
     >
@@ -270,8 +302,20 @@ const EditProfileDialog: React.FC<{ target: Profile; onClose: () => void }> = ({
         <Form.Item label={t('profile.field.gameName')} name="gameName" style={{ marginBottom: 12 }}>
           <CompactInput />
         </Form.Item>
-        <Form.Item label={t('profile.field.description')} name="description" style={{ marginBottom: 0 }}>
+        <Form.Item label={t('profile.field.description')} name="description" style={{ marginBottom: 12 }}>
           <CompactTextArea rows={2} />
+        </Form.Item>
+        <Form.Item label={t('profile.field.inputMode', 'Input mode')} style={{ marginBottom: 0 }}>
+          <CompactSelect
+            value={inputMode}
+            onChange={(v) => setInputMode(v as InputMode)}
+            options={[
+              { value: 'sendInput',          label: t('profile.inputMode.sendInput',          'SendInput — OS-level (default)') },
+              { value: 'postMessage',        label: t('profile.inputMode.postMessage',        'PostMessage — background-friendly') },
+              { value: 'postMessageWithPos', label: t('profile.inputMode.postMessageWithPos', 'PostMessage + WindowPos kick') },
+            ]}
+            style={{ width: '100%' }}
+          />
         </Form.Item>
       </Form>
     </FormDialog>

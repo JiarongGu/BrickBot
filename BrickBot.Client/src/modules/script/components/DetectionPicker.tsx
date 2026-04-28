@@ -23,6 +23,7 @@ const KIND_TAG_COLOR: Record<DetectionKind, string> = {
   pattern: 'blue',
   text: 'gold',
   bar: 'green',
+  composite: 'purple',
 };
 
 /** Snippet inserted at the cursor — picks the most useful field per detection
@@ -30,10 +31,11 @@ const KIND_TAG_COLOR: Record<DetectionKind, string> = {
 function snippetFor(def: DetectionDefinition): string {
   const access = (() => {
     switch (def.kind) {
-      case 'bar':     return '.value';   // 0..1 fill ratio
-      case 'tracker': return '.match';   // {x,y,w,h,cx,cy} — current position
-      case 'text':    return '.text';    // OCR string
-      case 'pattern': return '.match';   // matched bbox
+      case 'bar':       return '.value';   // 0..1 fill ratio
+      case 'tracker':   return '.match';   // {x,y,w,h,cx,cy} — current position
+      case 'text':      return '.text';    // OCR string
+      case 'pattern':   return '.match';   // matched bbox
+      case 'composite': return '.found';   // boolean AND/OR
     }
   })();
   return `detect.run('${def.name}')${access}`;

@@ -50,6 +50,20 @@ export interface CaptureSettings {
   defaultRoi?: RoiSettings;
 }
 
+/** How the runner delivers keyboard / mouse events to the target window.
+ *  • sendInput          — Win32 SendInput; OS-level. Steals focus + cursor; works against any
+ *                         focused window. Default for compat.
+ *  • postMessage        — PostMessage(WM_KEYDOWN/WM_LBUTTONDOWN). Background-friendly: target
+ *                         window does NOT need focus, cursor isn't stolen. Some games (raw-input
+ *                         FPS titles) ignore WM_KEY* — fall back to sendInput.
+ *  • postMessageWithPos — postMessage + temporary SetWindowPos kick. Workaround for games that
+ *                         consult window state inside their input handler. */
+export type InputMode = 'sendInput' | 'postMessage' | 'postMessageWithPos';
+
+export interface InputSettings {
+  mode: InputMode;
+}
+
 export interface ScriptSettings {
   entryFile?: string;
   autoStart: boolean;
@@ -60,6 +74,7 @@ export interface ProfileConfiguration {
   profileId: string;
   windowMatch: WindowMatchRule;
   capture: CaptureSettings;
+  input: InputSettings;
   script: ScriptSettings;
   uiHints: Record<string, string>;
 }

@@ -122,6 +122,30 @@ declare interface BbVisionApi {
 
   /** Drop all stored baselines. */
   clearBaselines(): void;
+
+  /**
+   * Block until an ROI's contents stop changing — wait out menu animations / fade-ins /
+   * transitions before sampling a fragile detection. Returns `true` when the ROI settles
+   * within `timeoutMs`, `false` on timeout.
+   *
+   * @example
+   * if (vision.waitStable({ x: 100, y: 50, w: 400, h: 200 }, { stableMs: 300, timeoutMs: 3000 })) {
+   *   const r = detect.run('confirm-button');
+   *   if (r.found) input.click(r.match.cx, r.match.cy);
+   * }
+   */
+  waitStable(roi: BbRect, opts?: BbWaitStableOptions): boolean;
+}
+
+declare interface BbWaitStableOptions {
+  /** ROI must hold steady for this many ms in a row to count as stable. Default 250. */
+  stableMs?: number;
+  /** Per-channel mean abs diff threshold (0..1). Higher = looser; tolerates more noise. Default 0.02. */
+  maxDiff?: number;
+  /** Sampling cadence in ms. Default 50. */
+  intervalMs?: number;
+  /** Give up after this many ms — returns false. Default 5000. */
+  timeoutMs?: number;
 }
 
 declare interface BbInputApi {

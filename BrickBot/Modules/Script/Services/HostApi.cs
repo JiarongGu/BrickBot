@@ -185,6 +185,77 @@ public sealed class HostApi : IDisposable
         _baselines.Clear();
     }
 
+    /// <summary>
+    /// Block until the contents of an ROI stop changing for <paramref name="stableMs"/> ms,
+    /// or <paramref name="timeoutMs"/> elapses. Implements MaaFramework's
+    /// <c>pre_wait_freezes</c> / <c>post_wait_freezes</c>: lets scripts wait out animations
+    /// before sampling a detection. Returns true when the ROI settled, false on timeout.
+    ///
+    /// Comparison: per-channel mean absolute difference between consecutive frames in the ROI,
+    /// normalized to 0..1. <paramref name="maxDiff"/> default 0.02 ≈ 5/255 mean drift, which
+    /// lets minor compression noise pass while still catching real motion.
+    /// </summary>
+    public bool waitStable(int x, int y, int w, int h, int stableMs, double maxDiff, int intervalMs, int timeoutMs)
+    {
+        if (intervalMs <= 0) intervalMs = 50;
+        if (stableMs <= 0) stableMs = 250;
+        if (timeoutMs <= 0) timeoutMs = 5000;
+
+        var sw = Stopwatch.StartNew();
+        Mat? prev = null;
+        long? stableSinceMs = null;
+
+        try
+        {
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                _host.EnsureNotCancelled();
+                using var frame = AcquireFrame();
+                var rect = ClampToFrame(frame, x, y, w, h);
+                if (rect.Width <= 0 || rect.Height <= 0) return false;
+
+                var current = new Mat(frame.Image, rect).Clone();
+                try
+                {
+                    if (prev is not null && prev.Size() == current.Size())
+                    {
+                        using var diff = new Mat();
+                        Cv2.Absdiff(current, prev, diff);
+                        var meanScalar = Cv2.Mean(diff);
+                        var meanDiff = (meanScalar.Val0 + meanScalar.Val1 + meanScalar.Val2) / (3.0 * 255.0);
+                        if (meanDiff <= maxDiff)
+                        {
+                            stableSinceMs ??= sw.ElapsedMilliseconds;
+                            if (sw.ElapsedMilliseconds - stableSinceMs.Value >= stableMs) return true;
+                        }
+                        else
+                        {
+                            stableSinceMs = null;
+                        }
+                    }
+
+                    prev?.Dispose();
+                    prev = current;
+                    current = null;  // ownership transferred to prev
+                }
+                finally { current?.Dispose(); }
+
+                Thread.Sleep(intervalMs);
+            }
+            return false;
+        }
+        finally { prev?.Dispose(); }
+    }
+
+    private static Rect ClampToFrame(CaptureFrame frame, int x, int y, int w, int h)
+    {
+        var cx = Math.Clamp(x, 0, frame.Width);
+        var cy = Math.Clamp(y, 0, frame.Height);
+        var cw = Math.Clamp(w, 0, frame.Width - cx);
+        var ch = Math.Clamp(h, 0, frame.Height - cy);
+        return new Rect(cx, cy, cw, ch);
+    }
+
     public void Dispose()
     {
         clearBaselines();

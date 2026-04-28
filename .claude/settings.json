@@ -39,11 +39,7 @@
       "Bash(tasklist)",
       "Bash(git status *)"
     ],
-    "additionalDirectories": [
-      ".claude",
-      ".claude/rules",
-      ".claude/skills"
-    ]
+    "additionalDirectories": [".claude", ".claude/rules", ".claude/skills"]
   },
   "hooks": {
     "UserPromptSubmit": [

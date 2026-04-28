@@ -29,4 +29,10 @@ public sealed class NewTrainingSample
     public string ImageBase64 { get; set; } = "";
     public string? Label { get; set; }
     public string? Note { get; set; }
+
+    /// <summary>Per-sample object box — see <see cref="BrickBot.Modules.Detection.Models.TrainingSample.ObjectBox"/>.</summary>
+    public BrickBot.Modules.Detection.Models.DetectionRoi? ObjectBox { get; set; }
+
+    /// <summary>Tracker init-frame flag — see <see cref="BrickBot.Modules.Detection.Models.TrainingSample.IsInit"/>.</summary>
+    public bool IsInit { get; set; }
 }

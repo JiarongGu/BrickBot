@@ -14,6 +14,9 @@ public sealed class ProfileConfiguration
     /// <summary>Capture pipeline settings (mode, FPS, ROI default).</summary>
     public CaptureSettings Capture { get; set; } = new();
 
+    /// <summary>Input delivery settings (SendInput vs PostMessage modes).</summary>
+    public InputSettings Input { get; set; } = new();
+
     /// <summary>Script settings: which JS file to run, autostart, etc.</summary>
     public ScriptSettings Script { get; set; } = new();
 
@@ -57,6 +60,17 @@ public sealed class RoiSettings
     public int Y { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
+}
+
+/// <summary>How input events are delivered to the target window. Default is OS-level
+/// <see cref="BrickBot.Modules.Input.Models.InputMode.SendInput"/>; switch to
+/// <see cref="BrickBot.Modules.Input.Models.InputMode.PostMessage"/> for background-window play
+/// when the target accepts <c>WM_KEYDOWN</c>/<c>WM_LBUTTONDOWN</c>. Try
+/// <see cref="BrickBot.Modules.Input.Models.InputMode.PostMessageWithPos"/> when PostMessage
+/// alone doesn't register (some games consult window state during input handling).</summary>
+public sealed class InputSettings
+{
+    public BrickBot.Modules.Input.Models.InputMode Mode { get; set; } = BrickBot.Modules.Input.Models.InputMode.SendInput;
 }
 
 /// <summary>Script wiring for this profile.</summary>

@@ -27,19 +27,54 @@ import { detectionService } from '../services/detectionService';
 import { recordingService } from '@/modules/recording';
 import { newDetection } from '../types';
 import type {
+  CompositeOp,
   DetectionDefinition,
   DetectionKind,
+  DetectionModel,
   DetectionResult,
   DetectionRoi,
   TrainingResult,
   TrainingSample,
 } from '../types';
-import { SamplesReviewPane, DiagnosticThumb } from './training';
+import { useDetectionStore } from '../store/detectionStore';
+import { AnnotationCanvas, DiagnosticThumb, SamplesReviewPane } from './training';
 import type { SampleRecord } from './training';
 import './TrainingPanel.css';
 
-type Step = 'setup' | 'samples' | 'roi' | 'train' | 'save';
+type Step = 'setup' | 'samples' | 'annotate' | 'search' | 'train' | 'save' | 'compose';
 
+const TRAINING_KINDS: { kind: DetectionKind; title: string; desc: string; labelHint: string }[] = [
+  {
+    kind: 'tracker',
+    title: 'Tracker (moving element / character)',
+    desc: 'Follow an element as it moves. Pick one frame as the init, drag a rectangle on the element, choose KCF / CSRT / MIL.',
+    labelHint: 'one-shot (no labels)',
+  },
+  {
+    kind: 'pattern',
+    title: 'Pattern (visual feature)',
+    desc: 'Detect element appearance via ORB descriptors. Train with positives (visible) and negatives (absent). Each positive needs its own object box.',
+    labelHint: 'true / false',
+  },
+  {
+    kind: 'text',
+    title: 'Text (OCR)',
+    desc: 'OCR the contents of a region — buff names, status banners. Drag a rectangle marking the text on one sample.',
+    labelHint: 'one-shot (no labels)',
+  },
+  {
+    kind: 'bar',
+    title: 'Bar (HP / MP / cooldown)',
+    desc: 'Track meter fill. Annotate each sample with the bar bbox + label the fill ratio (0..1).',
+    labelHint: 'fill 0..1',
+  },
+  {
+    kind: 'composite',
+    title: 'Composite (AND / OR)',
+    desc: 'Combine other detections with AND / OR. No samples needed — pick the operands and a boolean op.',
+    labelHint: 'no samples',
+  },
+];
 
 interface Props {
   onCancel: () => void;
@@ -48,44 +83,22 @@ interface Props {
   reTrainDetection?: DetectionDefinition;
 }
 
-const TRAINING_KINDS: { kind: DetectionKind; title: string; desc: string; labelHint: string }[] = [
-  {
-    kind: 'tracker',
-    title: 'Tracker (moving element / character)',
-    desc: 'Follow an element as it moves. Pick one frame, drag a rectangle on the element, choose KCF / CSRT / MIL. One-shot — no labeled samples needed.',
-    labelHint: 'one-shot (no labels)',
-  },
-  {
-    kind: 'pattern',
-    title: 'Pattern (visual feature)',
-    desc: 'Detect element appearance via ORB descriptors. Background-invariant. Train with positives (visible) and negatives (absent).',
-    labelHint: 'true / false',
-  },
-  {
-    kind: 'text',
-    title: 'Text (OCR)',
-    desc: 'OCR the contents of a region — buff names, status banners. One-shot: drag a rectangle, pick language, save.',
-    labelHint: 'one-shot (no labels)',
-  },
-  {
-    kind: 'bar',
-    title: 'Bar (HP / MP / cooldown)',
-    desc: 'Track meter fill. Train with screenshots at different fill levels (e.g. 0.1, 0.5, 1.0).',
-    labelHint: 'fill 0..1',
-  },
-];
-
 /**
- * 5-step wizard for training a detection from labeled samples.
- *   1. Setup    — pick kind + name
- *   2. Samples  — capture from window OR record multi-frame OR upload, label each
- *   3. ROI      — drag rect on a representative sample (or pick a high-variance suggestion)
- *   4. Train    — run trainer, see suggested config + per-sample diagnostics, tune sliders
- *   5. Save     — output bindings (ctxKey/event/overlay), save detection
+ * Training wizard — v3.
+ *
+ * Steps (kind-dependent):
+ *   tracker / text   → 1 setup · 2 samples · 3 annotate · 4 save
+ *   bar              → 1 setup · 2 samples · 3 annotate · 4 train · 5 save
+ *   pattern          → 1 setup · 2 samples · 3 annotate · 4 search ROI · 5 train · 6 save
+ *
+ * Domain split: TRAINING outputs a paired (DetectionDefinition, DetectionModel). Definition
+ * holds runtime knobs, Model holds compiled artifacts (descriptors, init frame, ref patch).
+ * Both must be persisted for the runner to use the trained detection.
  */
 export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetection }) => {
   const { t } = useTranslation();
   const profileId = useProfileStore((s) => s.activeProfileId);
+  const allDetections = useDetectionStore((s) => s.detections);
 
   const [step, setStep] = useState<Step>(reTrainDetection ? 'samples' : 'setup');
   const [kind, setKind] = useState<DetectionKind>(reTrainDetection?.kind ?? 'pattern');
@@ -95,30 +108,23 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
   const [windowHandle, setWindowHandle] = useState<number | undefined>();
   const [samples, setSamples] = useState<SampleRecord[]>([]);
   const [selected, setSelected] = useState<number>(0);
-  /** Multi-selected sample IDs for bulk operations (delete, apply-label-to-selection).
-   *  Distinct from `selected` (preview cursor). Cleared after every bulk op. */
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const [captureMode, setCaptureMode] = useState<'snapshot' | 'record' | 'recording' | 'upload'>('snapshot');
   const [recordings, setRecordings] = useState<{ id: string; name: string; frameCount: number }[]>([]);
   const [pickedRecordingId, setPickedRecordingId] = useState<string | undefined>();
   const [loadingFromRecording, setLoadingFromRecording] = useState(false);
-  /** Frame subset filter — start / end are inclusive frame indices, stride 1 = every frame. */
   const [frameRangeStart, setFrameRangeStart] = useState(0);
   const [frameRangeEnd, setFrameRangeEnd] = useState(0);
   const [frameStride, setFrameStride] = useState(1);
   const [recordIntervalMs, setRecordIntervalMs] = useState(500);
   const [recordDurationS, setRecordDurationS] = useState(10);
   const [recording, setRecording] = useState(false);
-  /** 0..1 progress through the active recording, ticking every 100ms so the bar animates. */
   const [recordProgress, setRecordProgress] = useState(0);
   const recordTimerRef = useRef<number | null>(null);
   const recordProgressTimerRef = useRef<number | null>(null);
   const recordStartRef = useRef<number>(0);
   const recordEndRef = useRef<number>(0);
-  /** Brief snapshot flash overlay key — bumped each capture so the CSS animation re-fires.
-   *  Currently consumed by a small header pulse; could drive a canvas-wrap overlay later. */
-  const [flashKey, setFlashKey] = useState(0);
 
   const [trainingResult, setTrainingResult] = useState<TrainingResult | undefined>();
   const [training, setTraining] = useState(false);
@@ -129,31 +135,25 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
   const [suggestions, setSuggestions] = useState<{ x: number; y: number; w: number; h: number; score: number; reason: string }[]>([]);
   const [suggestBusy, setSuggestBusy] = useState(false);
   const [saving, setSaving] = useState(false);
-  /** Per-sample DetectionResult — drives the diagnostic thumbnail overlays. */
   const [samplePredictions, setSamplePredictions] = useState<Record<string, DetectionResult>>({});
 
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const searchCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const labelHint = TRAINING_KINDS.find((k) => k.kind === kind)?.labelHint ?? 'label';
 
   // ---------- bootstrap ----------
 
-  // Cleanup record timers on unmount
   useEffect(() => () => {
     if (recordTimerRef.current) clearInterval(recordTimerRef.current);
     if (recordProgressTimerRef.current) clearInterval(recordProgressTimerRef.current);
   }, []);
 
-  // Auto-select the newest sample so users see what they just captured in the preview pane.
-  // The strip auto-scrolls because the active row has a different background — the layout
-  // doesn't need an explicit scrollIntoView.
   useEffect(() => {
     if (samples.length === 0) return;
     setSelected(samples.length - 1);
   }, [samples.length]);
 
-  // Load recordings list when entering Samples step or switching modes.
   useEffect(() => {
     if (!profileId) return;
     recordingService.list(profileId)
@@ -161,8 +161,6 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
       .catch(() => undefined);
   }, [profileId]);
 
-  // Auto-fill the range when the user picks a recording so the inputs reflect "all frames"
-  // without forcing them to type the upper bound by hand.
   useEffect(() => {
     if (!pickedRecordingId) return;
     const meta = recordings.find((r) => r.id === pickedRecordingId);
@@ -172,8 +170,6 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     setFrameStride(1);
   }, [pickedRecordingId, recordings]);
 
-  /** Indices the load button will pull, given range + stride. Memoized so the live count
-   *  preview stays cheap as the user scrubs the inputs. */
   const selectedFrameIndices = useMemo(() => {
     if (!pickedRecordingId) return [];
     const meta = recordings.find((r) => r.id === pickedRecordingId);
@@ -186,11 +182,6 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     return out;
   }, [pickedRecordingId, recordings, frameRangeStart, frameRangeEnd, frameStride]);
 
-  /** Pull a SUBSET of frames from a saved recording into the samples list. Honors the
-   *  start / end / stride filters so a 10-minute recording at 500ms intervals (1200 frames)
-   *  can be reduced to e.g. every 30th frame for a 40-sample training set.
-   *  Frames are fetched in parallel — sequential `await` on 49 IPC round-trips was the
-   *  primary cause of the 5–10s "Load frames" stall users hit on big recordings. */
   const loadFromRecording = useCallback(async (recordingId: string) => {
     if (!profileId) return;
     if (selectedFrameIndices.length === 0) return;
@@ -218,7 +209,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     finally { setLoadingFromRecording(false); }
   }, [profileId, selectedFrameIndices, t]);
 
-  // Re-train flow: pre-load saved samples for the chosen detection.
+  // Re-train flow: load saved samples + their object boxes.
   useEffect(() => {
     if (!reTrainDetection?.id || !profileId) return;
     let cancelled = false;
@@ -235,6 +226,8 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
             height: s.height,
             label: s.label ?? '',
             capturedAt: new Date(s.capturedAt).getTime(),
+            objectBox: s.objectBox,
+            isInit: s.isInit,
           }));
         setSamples(rows);
         if (rows.length > 0) {
@@ -246,54 +239,87 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reTrainDetection?.id, profileId]);
 
-  // ---------- step transitions ----------
+  // ---------- step transitions (kind-specific shape) ----------
 
-  /** One-shot kinds (tracker, text) skip the labeled-samples + train steps:
-   *   • tracker: capture ONE frame → drag bbox on it → save (init frame embedded by trainer).
-   *   • text   : capture ONE frame → drag bbox on it → save (region cached, OCR runs at runtime).
-   * Multi-sample kinds (pattern, bar) still walk the full 5-step wizard. */
-  const isOneShot = kind === 'tracker' || kind === 'text';
-
-  const stepOrder: Step[] = isOneShot
-    ? ['setup', 'samples', 'roi', 'save']
-    : ['setup', 'samples', 'roi', 'train', 'save'];
+  const stepOrder: Step[] = useMemo(() => {
+    if (kind === 'composite') return ['setup', 'compose', 'save'];
+    if (kind === 'tracker' || kind === 'text') return ['setup', 'samples', 'annotate', 'save'];
+    if (kind === 'bar') return ['setup', 'samples', 'annotate', 'train', 'save'];
+    return ['setup', 'samples', 'annotate', 'search', 'train', 'save']; // pattern
+  }, [kind]);
   const stepIndex = stepOrder.indexOf(step);
+
+  const annotatedCount = samples.filter((s) => s.objectBox && s.objectBox.w > 0 && s.objectBox.h > 0).length;
+  const initCount = samples.filter((s) => s.isInit).length;
 
   const canGoNext = (): boolean => {
     if (step === 'setup') return draft.name.trim().length > 0;
+    if (step === 'compose') return (draft.composite?.detectionIds.length ?? 0) > 0;
     if (step === 'samples') {
-      // One-shot kinds need exactly 1 frame and no labels; multi-sample kinds need ≥2 labeled.
-      if (isOneShot) return samples.length >= 1;
+      if (kind === 'tracker' || kind === 'text') return samples.length >= 1;
       return samples.length >= 2 && samples.every((s) => s.label.trim().length > 0);
     }
-    if (step === 'roi') return !!draft.roi && draft.roi.w > 0 && draft.roi.h > 0;
-    if (step === 'train') return !!trainingResult?.suggested;
+    if (step === 'annotate') {
+      if (kind === 'tracker') return initCount === 1 && samples.some((s) => s.isInit && hasValidBox(s.objectBox));
+      if (kind === 'text') return samples.some((s) => hasValidBox(s.objectBox));
+      if (kind === 'pattern') {
+        // Every positive sample needs a box. Negatives don't.
+        const posSamples = samples.filter((s) => isPositiveLabel(s.label));
+        return posSamples.length > 0 && posSamples.every((s) => hasValidBox(s.objectBox));
+      }
+      // bar — every sample needs a box.
+      return samples.length >= 2 && samples.every((s) => hasValidBox(s.objectBox));
+    }
+    if (step === 'search') return true; // search ROI is optional
+    if (step === 'train') return !!trainingResult?.model;
     return true;
   };
 
-  /** Human-readable explanation of WHY Next is currently disabled — surfaces in a Tooltip
-   *  so users don't stare at a grayed-out button wondering what's missing. */
   const nextBlockedReason = (): string | undefined => {
     if (step === 'setup' && !draft.name.trim()) return t('detection.train.nextBlock.name', 'Give the detection a name first.');
+    if (step === 'compose' && (draft.composite?.detectionIds.length ?? 0) === 0) {
+      return t('detection.train.compose.needsOperands', 'Add at least one operand detection.');
+    }
     if (step === 'samples') {
-      if (isOneShot && samples.length < 1) return t('detection.train.nextBlock.oneSample', 'Capture one frame to use as the reference.');
-      if (!isOneShot) {
+      if ((kind === 'tracker' || kind === 'text') && samples.length < 1) return t('detection.train.nextBlock.oneSample', 'Capture one frame.');
+      if (kind === 'pattern' || kind === 'bar') {
         if (samples.length < 2) return t('detection.train.nextBlock.minSamples', 'Capture at least 2 samples.');
         const unlabeled = samples.filter((s) => !s.label.trim()).length;
         if (unlabeled > 0) return t('detection.train.nextBlock.labels', '{{n}} sample(s) still need labels.', { n: unlabeled });
       }
     }
-    if (step === 'roi' && (!draft.roi || draft.roi.w <= 0 || draft.roi.h <= 0))
-      return t('detection.train.nextBlock.roi', 'Drag a rectangle on the preview to mark the element.');
-    if (step === 'train' && !trainingResult?.suggested)
-      return t('detection.train.nextBlock.train', 'Run training first to produce a suggested config.');
+    if (step === 'annotate') {
+      if (kind === 'tracker') {
+        if (initCount === 0) return t('detection.train.nextBlock.trackerInit', 'Pick exactly one sample as the init frame.');
+        if (initCount > 1) return t('detection.train.nextBlock.trackerInitOne', 'Only one sample can be the init frame.');
+        const init = samples.find((s) => s.isInit);
+        if (!init || !hasValidBox(init.objectBox)) return t('detection.train.nextBlock.trackerBox', 'Drag a box on the init frame.');
+      }
+      if (kind === 'text') {
+        if (!samples.some((s) => hasValidBox(s.objectBox))) return t('detection.train.nextBlock.textBox', 'Drag a box on at least one sample to mark the text region.');
+      }
+      if (kind === 'pattern') {
+        const posSamples = samples.filter((s) => isPositiveLabel(s.label));
+        if (posSamples.length === 0) return t('detection.train.nextBlock.patternPos', 'Need at least one positive sample.');
+        const missing = posSamples.filter((s) => !hasValidBox(s.objectBox)).length;
+        if (missing > 0) return t('detection.train.nextBlock.patternBoxes', '{{n}} positive sample(s) still need an object box.', { n: missing });
+      }
+      if (kind === 'bar') {
+        const missing = samples.filter((s) => !hasValidBox(s.objectBox)).length;
+        if (missing > 0) return t('detection.train.nextBlock.barBoxes', '{{n}} sample(s) still need a bar box.', { n: missing });
+      }
+    }
+    if (step === 'train' && !trainingResult?.model)
+      return t('detection.train.nextBlock.train', 'Run training first to produce a model.');
     return undefined;
   };
 
   const next = () => {
     const i = stepIndex;
-    if (i < stepOrder.length - 1) setStep(stepOrder[i + 1]);
-    if (stepOrder[i + 1] === 'train' && !trainingResult && samples.length >= 2) {
+    const dest = stepOrder[i + 1];
+    if (!dest) return;
+    setStep(dest);
+    if (dest === 'train' && !trainingResult) {
       void runTraining();
     }
   };
@@ -306,9 +332,11 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     const fresh = newDetection(k);
     setDraft({ ...fresh, name: draft.name });
     setTrainingResult(undefined);
+    // Switching kinds invalidates per-sample annotations (semantics differ).
+    setSamples((prev) => prev.map((s) => ({ ...s, objectBox: undefined, isInit: false })));
   };
 
-  // ---------- step 2: samples ----------
+  // ---------- step 2: samples (capture / record / load / upload) ----------
 
   const grabFrame = useCallback(async (): Promise<{ b64: string; w: number; h: number } | null> => {
     if (!windowHandle) return null;
@@ -337,10 +365,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
 
   const onSnapshot = async () => {
     const f = await grabFrame();
-    if (f) {
-      addSample(f.b64, f.w, f.h);
-      setFlashKey((k) => k + 1);  // brief visual confirmation flash
-    }
+    if (f) addSample(f.b64, f.w, f.h);
   };
 
   const startRecording = () => {
@@ -352,7 +377,6 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     setRecordProgress(0);
     recordStartRef.current = Date.now();
     recordEndRef.current = recordStartRef.current + recordDurationS * 1000;
-
     const tick = async () => {
       if (Date.now() >= recordEndRef.current) { stopRecording(); return; }
       const f = await grabFrame();
@@ -360,10 +384,6 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     };
     void tick();
     recordTimerRef.current = window.setInterval(() => { void tick(); }, recordIntervalMs);
-
-    // Independent UI ticker — drives the progress bar smoothly (every 100ms) without
-    // coupling to the capture cadence. Without this the bar only updates when a frame
-    // lands, which is too coarse at long intervals (1s+).
     recordProgressTimerRef.current = window.setInterval(() => {
       const total = recordDurationS * 1000;
       const elapsed = Date.now() - recordStartRef.current;
@@ -384,7 +404,6 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     let bin = '';
     for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
     const b64 = btoa(bin);
-    // Decode dimensions client-side via Image
     await new Promise<void>((resolve) => {
       const img = new Image();
       img.onload = () => { addSample(b64, img.width, img.height); resolve(); };
@@ -400,7 +419,6 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
   const removeSample = (i: number) => {
     setSamples((s) => s.filter((_, idx) => idx !== i));
     if (selected >= i && selected > 0) setSelected(selected - 1);
-    // Drop the removed sample from the multi-select set if it was in there.
     setSelectedIds((prev) => {
       const id = samples[i]?.id;
       if (!id || !prev.has(id)) return prev;
@@ -410,7 +428,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     });
   };
 
-  // ---------- multi-select / bulk operations ----------
+  // ---------- multi-select / bulk ----------
 
   const toggleSelectId = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -420,20 +438,13 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     });
   }, []);
 
-  const setSelectionIds = useCallback((ids: string[]) => {
-    setSelectedIds(new Set(ids));
-  }, []);
-
+  const setSelectionIds = useCallback((ids: string[]) => setSelectedIds(new Set(ids)), []);
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
 
-  /** Remove every multi-selected sample. Re-anchors the preview cursor on the
-   *  closest surviving sample so the right pane never goes blank when there's
-   *  still data left. */
   const removeSelectedSamples = useCallback(() => {
     if (selectedIds.size === 0) return;
     setSamples((prev) => {
       const survivors = prev.filter((s) => !selectedIds.has(s.id));
-      // Pick a sensible new preview index — use the same position when possible.
       setSelected((cur) => Math.max(0, Math.min(survivors.length - 1, cur)));
       return survivors;
     });
@@ -451,68 +462,89 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     setSamples((prev) => prev.map((s) => (selectedIds.has(s.id) ? { ...s, label } : s)));
   }, [selectedIds]);
 
-  // ---------- step 3: ROI canvas ----------
+  // ---------- step 3: annotate (per-sample object box) ----------
 
-  const currentSample = samples[selected];
+  const setBoxOn = useCallback((idx: number, box: DetectionRoi | undefined) => {
+    setSamples((prev) => prev.map((s, i) => (i === idx ? { ...s, objectBox: box } : s)));
+  }, []);
+
+  const setIsInitOn = useCallback((idx: number, init: boolean) => {
+    // Tracker init is mutually exclusive across samples.
+    setSamples((prev) => prev.map((s, i) => ({ ...s, isInit: i === idx ? init : (init ? false : s.isInit) })));
+  }, []);
+
+  const copyBoxFromPrev = useCallback((idx: number) => {
+    if (idx === 0) return;
+    const prevBox = samples[idx - 1]?.objectBox;
+    if (prevBox) setBoxOn(idx, { ...prevBox });
+  }, [samples, setBoxOn]);
+
+  const applyBoxToAll = useCallback((idx: number) => {
+    const box = samples[idx]?.objectBox;
+    if (!box) return;
+    setSamples((prev) => prev.map((s) => ({ ...s, objectBox: { ...box } })));
+  }, [samples]);
+
+  const clearAllBoxes = useCallback(() => {
+    setSamples((prev) => prev.map((s) => ({ ...s, objectBox: undefined, isInit: false })));
+  }, []);
+
+  // ---------- step 4: search ROI (pattern only) ----------
 
   useEffect(() => {
-    if (step !== 'roi' && step !== 'train') return;
-    if (!currentSample || !canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
+    if (step !== 'search') return;
+    const sample = samples[selected];
+    if (!sample || !searchCanvasRef.current) return;
+    const c = searchCanvasRef.current;
+    const ctx = c.getContext('2d');
     if (!ctx) return;
     const img = new Image();
     img.onload = () => {
-      canvas.width = currentSample.width;
-      canvas.height = currentSample.height;
+      c.width = sample.width;
+      c.height = sample.height;
       ctx.drawImage(img, 0, 0);
-      drawOverlay(ctx);
-    };
-    img.src = `data:image/png;base64,${currentSample.imageBase64}`;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentSample?.id, draft.roi?.x, draft.roi?.y, draft.roi?.w, draft.roi?.h, step, trainingResult, suggestions]);
-
-  const drawOverlay = (ctx: CanvasRenderingContext2D) => {
-    if (draft.roi && draft.roi.w > 0 && draft.roi.h > 0) {
-      ctx.strokeStyle = '#1890ff';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 4]);
-      ctx.strokeRect(draft.roi.x + 0.5, draft.roi.y + 0.5, draft.roi.w, draft.roi.h);
-      ctx.fillStyle = 'rgba(24, 144, 255, 0.10)';
-      ctx.fillRect(draft.roi.x, draft.roi.y, draft.roi.w, draft.roi.h);
-    }
-    if (step === 'roi') {
-      // Draw ROI suggestions in orange.
+      // Search ROI in green dashed
+      if (draft.roi && draft.roi.w > 0 && draft.roi.h > 0) {
+        ctx.strokeStyle = '#52c41a';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(draft.roi.x + 0.5, draft.roi.y + 0.5, draft.roi.w, draft.roi.h);
+        ctx.fillStyle = 'rgba(82, 196, 26, 0.10)';
+        ctx.fillRect(draft.roi.x, draft.roi.y, draft.roi.w, draft.roi.h);
+      }
+      // Suggestions in orange dashed
       ctx.strokeStyle = '#fa8c16';
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 3]);
       for (const s of suggestions) {
         ctx.strokeRect(s.x + 0.5, s.y + 0.5, s.w, s.h);
       }
-    }
-  };
+    };
+    img.src = `data:image/png;base64,${sample.imageBase64}`;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, samples, selected, draft.roi?.x, draft.roi?.y, draft.roi?.w, draft.roi?.h, suggestions]);
 
-  const canvasToPixel = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const c = canvasRef.current;
-    if (!c || !currentSample) return null;
+  const searchCanvasToPixel = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const c = searchCanvasRef.current;
+    const sample = samples[selected];
+    if (!c || !sample) return null;
     const rect = c.getBoundingClientRect();
-    const sx = currentSample.width / rect.width;
-    const sy = currentSample.height / rect.height;
+    const sx = sample.width / rect.width;
+    const sy = sample.height / rect.height;
     return {
-      x: Math.max(0, Math.min(currentSample.width - 1, Math.round((e.clientX - rect.left) * sx))),
-      y: Math.max(0, Math.min(currentSample.height - 1, Math.round((e.clientY - rect.top) * sy))),
+      x: Math.max(0, Math.min(sample.width - 1, Math.round((e.clientX - rect.left) * sx))),
+      y: Math.max(0, Math.min(sample.height - 1, Math.round((e.clientY - rect.top) * sy))),
     };
   };
-
-  const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const p = canvasToPixel(e);
+  const onSearchMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const p = searchCanvasToPixel(e);
     if (!p) return;
     dragStartRef.current = p;
     setDraft({ ...draft, roi: { x: p.x, y: p.y, w: 0, h: 0 } });
   };
-  const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const onSearchMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!dragStartRef.current) return;
-    const p = canvasToPixel(e);
+    const p = searchCanvasToPixel(e);
     if (!p) return;
     const start = dragStartRef.current;
     setDraft({
@@ -523,7 +555,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
       },
     });
   };
-  const onMouseUp = () => { dragStartRef.current = null; };
+  const onSearchMouseUp = () => { dragStartRef.current = null; };
 
   const onSuggestRois = async () => {
     if (samples.length < 2) {
@@ -541,63 +573,63 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     finally { setSuggestBusy(false); }
   };
 
-  // ---------- step 4: train + tune ----------
+  // ---------- step 5: train + diagnostics ----------
+
+  const buildTrainingSamples = (): TrainingSample[] => samples.map((s) => ({
+    imageBase64: s.imageBase64,
+    label: s.label.trim(),
+    objectBox: s.objectBox,
+    isInit: s.isInit,
+  }));
 
   const runTraining = useCallback(async () => {
     if (!profileId) return;
-    if (samples.length < 2) {
-      message.warning(t('detection.train.needAtLeastTwo', 'Add at least 2 labeled samples.'));
-      return;
-    }
     setTraining(true);
     setTrainingResult(undefined);
     try {
-      const tsamples: TrainingSample[] = samples.map((s) => ({
-        imageBase64: s.imageBase64,
-        label: s.label.trim(),
-        roi: draft.roi,
-      }));
-      const r = await detectionService.train(profileId, kind, tsamples, draft);
+      const r = await detectionService.train(profileId, kind, buildTrainingSamples(), draft);
       setTrainingResult(r);
-      // Seed tune sliders from suggestion
-      if (r.suggested?.bar) {
-        setTuneTolerance(r.suggested.bar.tolerance);
-        setTuneLineThreshold(r.suggested.bar.lineThreshold);
+      // Seed tune sliders
+      if (r.definition?.bar) {
+        setTuneTolerance(r.definition.bar.tolerance);
+        setTuneLineThreshold(r.definition.bar.lineThreshold);
       }
-      if (r.suggested?.pattern) setTuneMinConfidence(r.suggested.pattern.minConfidence);
-      // Merge suggestion into draft (preserves the user's name).
-      if (r.suggested) {
-        setDraft({ ...r.suggested, id: draft.id, name: draft.name, group: draft.group, output: draft.output });
-        // Run TEST per sample so the diagnostic thumbnails can render predicted overlays.
-        const previews: Record<string, DetectionResult> = {};
-        for (const s of samples) {
-          try {
-            const tr = await detectionService.test(profileId, r.suggested, s.imageBase64);
-            previews[s.id] = tr;
-          } catch { /* skip — diagnostic row still shows text from trainer */ }
+      if (r.definition?.pattern) setTuneMinConfidence(r.definition.pattern.minConfidence);
+      // Merge trained definition (preserves user-typed identity fields).
+      if (r.definition) {
+        setDraft((cur) => ({ ...r.definition!, id: cur.id, name: cur.name, group: cur.group, output: cur.output }));
+        // Run TEST per sample with the candidate model to populate the live preview overlays.
+        if (r.model) {
+          const previews: Record<string, DetectionResult> = {};
+          for (const s of samples) {
+            try {
+              const tr = await detectionService.test(profileId, r.definition, s.imageBase64, r.model);
+              previews[s.id] = tr;
+            } catch { /* skip — diagnostic still shows label/predicted */ }
+          }
+          setSamplePredictions(previews);
         }
-        setSamplePredictions(previews);
       }
     } catch (e) { message.error(String(e)); }
     finally { setTraining(false); }
-  }, [profileId, samples, kind, draft, t]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId, samples, kind, draft]);
 
   const reTest = useCallback(async () => {
-    if (!profileId || !trainingResult?.suggested) return;
-    // Apply tune values to a copy and ask backend to test against each sample.
-    const tuned: DetectionDefinition = JSON.parse(JSON.stringify(trainingResult.suggested));
+    if (!profileId || !trainingResult?.definition || !trainingResult.model) return;
+    const tuned: DetectionDefinition = JSON.parse(JSON.stringify(trainingResult.definition));
     if (tuned.bar) {
       if (tuneTolerance !== undefined) tuned.bar.tolerance = tuneTolerance;
       if (tuneLineThreshold !== undefined) tuned.bar.lineThreshold = tuneLineThreshold;
     }
     if (tuned.pattern && tuneMinConfidence !== undefined) tuned.pattern.minConfidence = tuneMinConfidence;
 
-    // Run TEST per sample to refresh diagnostics + populate prediction previews.
-    const newDiagnostics: typeof trainingResult.diagnostics = [];
     const previews: Record<string, DetectionResult> = {};
-    for (const s of samples) {
+    const newDiagnostics = trainingResult.diagnostics.slice();
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
       try {
-        const r = await detectionService.test(profileId, tuned, s.imageBase64);
+        const r = await detectionService.test(profileId, tuned, s.imageBase64, trainingResult.model);
         previews[s.id] = r;
         const predicted = r.kind === 'bar' ? (r.value ?? 0).toFixed(3)
           : r.kind === 'pattern' ? `${r.found ? 'true' : 'false'} (${(r.confidence ?? 0).toFixed(2)})`
@@ -606,58 +638,64 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
         const labelNum = parseFloat(s.label);
         const predNum = parseFloat(predicted);
         const err = !isNaN(labelNum) && !isNaN(predNum) ? Math.abs(labelNum - predNum) : (predicted.startsWith(s.label.trim().toLowerCase()) ? 0 : 1);
-        newDiagnostics.push({ label: s.label, predicted, error: err });
-      } catch { newDiagnostics.push({ label: s.label, predicted: 'error', error: 1 }); }
+        newDiagnostics[i] = {
+          ...newDiagnostics[i],
+          label: s.label,
+          predicted,
+          error: err,
+          predictedBox: r.match ? { x: r.match.x, y: r.match.y, w: r.match.w, h: r.match.h } : undefined,
+          iou: newDiagnostics[i]?.iou ?? 0,
+        };
+      } catch { /* keep prior diagnostic */ }
     }
     setSamplePredictions(previews);
-    setTrainingResult({ ...trainingResult, suggested: tuned, diagnostics: newDiagnostics });
-    setDraft({ ...tuned, id: draft.id, name: draft.name, group: draft.group, output: draft.output });
-  }, [profileId, samples, trainingResult, tuneTolerance, tuneLineThreshold, tuneMinConfidence, draft]);
+    setTrainingResult({ ...trainingResult, definition: tuned, diagnostics: newDiagnostics });
+    setDraft((cur) => ({ ...tuned, id: cur.id, name: cur.name, group: cur.group, output: cur.output }));
+  }, [profileId, samples, trainingResult, tuneTolerance, tuneLineThreshold, tuneMinConfidence]);
 
-  // ---------- step 5: save ----------
+  // ---------- step 6: save (def + model + samples) ----------
 
   const onSave = async () => {
     if (!profileId || !draft.name.trim()) return;
     setSaving(true);
     try {
-      // One-shot kinds (tracker / text) skip the multi-sample train step. They still need
-      // the trainer to encode runtime artifacts (tracker.initFramePng, text options) before
-      // save — so we run training inline here using the first captured frame as the seed.
-      // The seed carries the user-drawn bbox (draft.roi → tracker.initX/Y/W/H).
-      let toSave = draft;
-      if (isOneShot) {
-        if (samples.length === 0 || !draft.roi || draft.roi.w <= 0 || draft.roi.h <= 0) {
-          throw new Error(t('detection.train.nextBlock.roi', 'Drag a rectangle on the preview to mark the element.') as string);
+      // For one-shot kinds (tracker / text / composite) we may not have run training yet — do it inline.
+      // Composite uses no samples; trainer reads operand ids from seed.composite.
+      let result = trainingResult;
+      if (!result) {
+        if (kind === 'tracker' || kind === 'text') {
+          result = await detectionService.train(profileId, kind, buildTrainingSamples(), draft);
+        } else if (kind === 'composite') {
+          result = await detectionService.train(profileId, kind, [], draft);
+        } else {
+          throw new Error(t('detection.train.nextBlock.train', 'Run training first to produce a model.') as string);
         }
-        // For tracker, transfer the ROI into the kind-specific options block before training.
-        // The trainer reads draft.tracker.InitX/Y/W/H to package the init bbox.
-        const seed: DetectionDefinition = JSON.parse(JSON.stringify(draft));
-        if (kind === 'tracker') {
-          seed.tracker = {
-            ...(seed.tracker ?? { algorithm: 'kcf', reacquireOnLost: true, initX: 0, initY: 0, initW: 0, initH: 0 }),
-            initX: draft.roi.x,
-            initY: draft.roi.y,
-            initW: draft.roi.w,
-            initH: draft.roi.h,
-          };
-        }
-        const trainingSamples: TrainingSample[] = [{
-          imageBase64: samples[0].imageBase64,
-          label: '',
-          roi: draft.roi,
-        }];
-        const r = await detectionService.train(profileId, kind, trainingSamples, seed);
-        if (!r.suggested) throw new Error('Trainer returned no suggested definition.');
-        toSave = { ...r.suggested, name: draft.name, group: draft.group, output: draft.output };
       }
+      if (!result.definition || !result.model) {
+        throw new Error('Trainer returned no model — check sample annotations.');
+      }
+      const toSave: DetectionDefinition = {
+        ...result.definition,
+        name: draft.name,
+        group: draft.group,
+        output: draft.output,
+      };
+      const savedDef = await detectionService.save(profileId, toSave);
+      // Model id mirrors detection id (assigned by SAVE if blank).
+      const modelToSave: DetectionModel = { ...result.model, id: savedDef.id, detectionId: savedDef.id };
+      await detectionService.saveModel(profileId, modelToSave);
 
-      const saved = await detectionService.save(profileId, toSave);
-      // Persist labeled samples for re-training later. Skip for one-shot kinds — there's
-      // only one unlabeled init frame, no value in storing it as a "sample".
-      if (!isOneShot) {
+      // Persist labeled samples for later re-training. Composite has no samples.
+      if (kind !== 'composite' && samples.length > 0) {
         try {
-          await detectionService.saveSamples(profileId, saved.id,
-            samples.map((s) => ({ id: s.id, imageBase64: s.imageBase64, label: s.label })),
+          await detectionService.saveSamples(profileId, savedDef.id,
+            samples.map((s) => ({
+              id: s.id,
+              imageBase64: s.imageBase64,
+              label: s.label,
+              objectBox: s.objectBox,
+              isInit: s.isInit,
+            })),
             true);
         } catch (e) {
           console.warn('Failed to persist training samples', e);
@@ -665,7 +703,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
         }
       }
       message.success(t('detection.train.saved', 'Detection saved.'));
-      onSaved(saved);
+      onSaved({ ...savedDef, hasModel: true });
     } catch (e) { message.error(String(e)); }
     finally { setSaving(false); }
   };
@@ -683,9 +721,11 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
   const stepLabels: Record<Step, string> = {
     setup: t('detection.train.step.setup', '1. Setup'),
     samples: t('detection.train.step.samples', '2. Samples'),
-    roi: t('detection.train.step.roi', '3. ROI'),
-    train: t('detection.train.step.train', '4. Train & Tune'),
-    save: t('detection.train.step.save', '5. Save'),
+    annotate: t('detection.train.step.annotate', '3. Annotate'),
+    search: t('detection.train.step.search', 'Search ROI'),
+    train: t('detection.train.step.train', 'Train & Tune'),
+    save: t('detection.train.step.save', 'Save'),
+    compose: t('detection.train.step.compose', 'Compose'),
   };
 
   return (
@@ -720,9 +760,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
                   onClick={() => pickKind(k.kind)}
                 >
                   <div className="training-kind-card__title">{t(`detection.kind.${k.kind}`, k.title)}</div>
-                  <div className="training-kind-card__desc">
-                    {t(`detection.train.kindDesc.${k.kind}`, k.desc)}
-                  </div>
+                  <div className="training-kind-card__desc">{t(`detection.train.kindDesc.${k.kind}`, k.desc)}</div>
                 </div>
               ))}
             </div>
@@ -736,17 +774,10 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
         )}
 
         {step === 'samples' && (() => {
-          /** Toolbar JSX rendered in the LEFT column of SamplesReviewPane, above the strip.
-           *  Built here (not inline in the pane) so the parent keeps owning capture-mode
-           *  state. Single grid cell means the screen-shaped preview canvas dominates the
-           *  RIGHT column at full available width. */
           const recordingMeta = recordings.find((r) => r.id === pickedRecordingId);
           const recordingMax = recordingMeta ? Math.max(0, recordingMeta.frameCount - 1) : 0;
           const samplesToolbar = (
             <>
-              {/* No icons — block segmented in a 360px column gives each option ~85px;
-                  icon + long label truncated ("Snaps...", "From r..."). Short labels alone
-                  fit comfortably. "Library" replaces "Recordings" to free up letters. */}
               <CompactSegmented
                 value={captureMode}
                 onChange={(v) => setCaptureMode(v as 'snapshot' | 'record' | 'recording' | 'upload')}
@@ -760,11 +791,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
               />
 
               {(captureMode === 'snapshot' || captureMode === 'record') && (
-                <WindowSelector
-                  value={windowHandle}
-                  onChange={setWindowHandle}
-                  minWidth={240}
-                />
+                <WindowSelector value={windowHandle} onChange={setWindowHandle} minWidth={240} />
               )}
 
               {captureMode === 'snapshot' && (
@@ -778,9 +805,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
               {captureMode === 'record' && (
                 <>
                   <div className="training-record-bar">
-                    <span className="training-record-bar__label">
-                      {t('detection.train.duration', 'Duration')}:
-                    </span>
+                    <span className="training-record-bar__label">{t('detection.train.duration', 'Duration')}:</span>
                     <CompactSelect
                       size="small"
                       value={recordDurationS}
@@ -788,9 +813,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
                       options={[5, 10, 30, 60].map((n) => ({ value: n, label: `${n}s` }))}
                       style={{ width: 80 }}
                     />
-                    <span className="training-record-bar__label">
-                      {t('detection.train.interval', 'Interval')}:
-                    </span>
+                    <span className="training-record-bar__label">{t('detection.train.interval', 'Interval')}:</span>
                     <CompactSelect
                       size="small"
                       value={recordIntervalMs}
@@ -808,19 +831,6 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
                       {t('detection.train.record', 'Record')}
                     </CompactPrimaryButton>
                   )}
-                  {recording && (
-                    <div className="training-record-bar training-record-bar--progress">
-                      <div className="training-record-bar__progress">
-                        <div
-                          className="training-record-bar__progress-fill"
-                          style={{ width: `${(recordProgress * 100).toFixed(1)}%` }}
-                        />
-                      </div>
-                      <span className="training-record-bar__label training-record-bar__label--muted training-record-bar__label--minw">
-                        {samples.length} {t('detection.train.captured', 'captured')}
-                      </span>
-                    </div>
-                  )}
                 </>
               )}
 
@@ -835,9 +845,6 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
                   />
                   {pickedRecordingId && (
                     <>
-                      {/* Slim slider row with inline readout + stride. Slider's vertical
-                          chrome is forced flat (padding/margin 0) so the whole control
-                          collapses to ~24px. Load button stays prominent + block below. */}
                       <div className="training-range__row">
                         <Slider
                           range
@@ -851,18 +858,14 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
                           }}
                           className="training-range__slider"
                         />
-                        <span className="training-range__readout">
-                          {frameRangeStart}–{frameRangeEnd}
-                        </span>
-                        <Tooltip title={t('detection.train.strideTip', 'Pick every Nth frame') as string}>
-                          <CompactInput
-                            size="small"
-                            value={frameStride}
-                            onChange={(e) => setFrameStride(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                            style={{ width: 64 }}
-                            addonAfter={t('detection.train.strideUnit', 'th') as string}
-                          />
-                        </Tooltip>
+                        <span className="training-range__readout">{frameRangeStart}–{frameRangeEnd}</span>
+                        <CompactInput
+                          size="small"
+                          value={frameStride}
+                          onChange={(e) => setFrameStride(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                          style={{ width: 64 }}
+                          addonAfter={t('detection.train.strideUnit', 'th') as string}
+                        />
                       </div>
                       <CompactPrimaryButton
                         block
@@ -892,14 +895,16 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
             </>
           );
 
+          const reviewSamples = samples.map((s) => ({
+            ...s,
+            hasBox: hasValidBox(s.objectBox),
+          }));
+
           return (
             <div className="training-step training-step--wide">
-              {/* No title or hint row — the steps strip says "2. Samples", and the
-                  label-format hint is rendered inline in the preview header / empty
-                  state. Saves the full top stripe of vertical space for the canvas. */}
               <SamplesReviewPane
                 kind={kind}
-                samples={samples}
+                samples={reviewSamples}
                 selected={selected}
                 selectedIds={selectedIds}
                 toolbar={samplesToolbar}
@@ -919,17 +924,124 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
           );
         })()}
 
-        {step === 'roi' && (
+        {step === 'annotate' && (() => {
+          const sample = samples[selected];
+          const reviewSamples = samples.map((s) => ({ ...s, hasBox: hasValidBox(s.objectBox) }));
+
+          // Sample picker on the left, big annotation canvas on the right.
+          return (
+            <div className="training-step training-step--wide">
+              <div className="samples-review">
+                <div className="samples-review__left">
+                  <div className="samples-review__strip">
+                    <div className="samples-review__strip-header">
+                      <span className="samples-review__count">
+                        {t('detection.train.annotate.boxedCount', '{{n}} of {{total}} samples annotated', { n: annotatedCount, total: samples.length })}
+                      </span>
+                    </div>
+                    <div className="samples-review__strip-body">
+                      {reviewSamples.map((s, i) => (
+                        <div
+                          key={s.id}
+                          className={classNames('samples-review__row', {
+                            'samples-review__row--active': i === selected,
+                          })}
+                          onClick={() => setSelected(i)}
+                        >
+                          <img className="samples-review__thumb" src={`data:image/png;base64,${s.imageBase64}`} alt="" />
+                          <div className="samples-review__row-info">
+                            <div className="samples-review__row-name">
+                              #{i + 1}
+                              {s.isInit && <span className="samples-review__row-badge samples-review__row-badge--init" title="Init frame" />}
+                              {s.hasBox && !s.isInit && <span className="samples-review__row-badge" title="Annotated" />}
+                            </div>
+                            <div className="samples-review__row-label">{s.label || '—'}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="samples-review__preview">
+                  {sample ? (
+                    <AnnotationCanvas
+                      kind={kind}
+                      imageBase64={sample.imageBase64}
+                      width={sample.width}
+                      height={sample.height}
+                      box={sample.objectBox}
+                      isInit={!!sample.isInit}
+                      previousBox={selected > 0 ? samples[selected - 1]?.objectBox : undefined}
+                      annotatedCount={annotatedCount}
+                      totalCount={samples.length}
+                      onChange={(box) => setBoxOn(selected, box)}
+                      onSetIsInit={(init) => setIsInitOn(selected, init)}
+                      onCopyFromPrev={selected > 0 ? () => copyBoxFromPrev(selected) : undefined}
+                      onApplyToAll={kind !== 'tracker' ? () => applyBoxToAll(selected) : undefined}
+                      onClearAll={annotatedCount > 0 ? clearAllBoxes : undefined}
+                    />
+                  ) : (
+                    <div className="samples-review__empty">
+                      {t('detection.train.noSample', 'Capture a sample first.')}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {step === 'compose' && (() => {
+          const comp = draft.composite ?? { op: 'and' as CompositeOp, detectionIds: [] };
+          const setComposite = (patch: Partial<typeof comp>) => setDraft({ ...draft, composite: { ...comp, ...patch } });
+          const operandOptions = allDetections
+            .filter((d) => d.id && d.id !== draft.id && d.kind !== 'composite')
+            .map((d) => ({ value: d.id, label: `${d.name || d.id} (${d.kind})` }));
+          return (
+            <div className="training-step">
+              <div className="training-step__title">{t('detection.train.compose.title', 'Compose other detections')}</div>
+              <div className="training-step__hint">{t('detection.train.compose.hint', 'Pick the operand detections and choose AND (all must match) or OR (any matches).')}</div>
+              <div>
+                <span style={{ fontSize: 12 }}>{t('detection.train.compose.op', 'Operator')}</span>
+                <CompactSegmented
+                  value={comp.op}
+                  onChange={(v) => setComposite({ op: v as CompositeOp })}
+                  options={[
+                    { value: 'and', label: t('detection.train.compose.opAnd', 'AND — all must match') },
+                    { value: 'or', label: t('detection.train.compose.opOr', 'OR — any one matches') },
+                  ]}
+                />
+              </div>
+              <div>
+                <span style={{ fontSize: 12 }}>{t('detection.train.compose.operands', 'Operands')}</span>
+                <CompactSelect
+                  mode="multiple"
+                  value={comp.detectionIds}
+                  onChange={(v) => setComposite({ detectionIds: v as string[] })}
+                  options={operandOptions}
+                  placeholder={t('detection.train.compose.needsOperands', 'Add at least one operand detection.') as string}
+                  style={{ width: '100%' }}
+                />
+              </div>
+            </div>
+          );
+        })()}
+
+        {step === 'search' && (
           <div className="training-step">
-            <div className="training-step__title">{t('detection.train.roi.title', 'Where is the thing?')}</div>
+            <div className="training-step__title">{t('detection.train.search.title', 'Where should the runner look at runtime?')}</div>
             <div className="training-step__hint">
-              {t('detection.train.roi.hint', 'Drag a rectangle on the sample, or auto-detect dynamic regions from your recording.')}
+              {t('detection.train.search.hint', 'Optional: cap the runtime search area. Default = whole frame.')}
             </div>
             <div className="training-samples-grid">
               <div>
                 <CompactSpace>
                   <CompactButton size="small" loading={suggestBusy} icon={<ThunderboltOutlined />} onClick={() => void onSuggestRois()}>
                     {t('detection.train.suggestRois', 'Suggest dynamic regions')}
+                  </CompactButton>
+                  <CompactButton size="small" onClick={() => setDraft({ ...draft, roi: undefined })}>
+                    {t('detection.train.search.useFull', 'Use whole frame')}
                   </CompactButton>
                 </CompactSpace>
                 <div className="training-sample-strip" style={{ marginTop: 8 }}>
@@ -948,14 +1060,14 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
                 </div>
               </div>
               <div className="training-canvas-wrap">
-                {currentSample ? (
+                {samples[selected] ? (
                   <canvas
-                    ref={canvasRef}
+                    ref={searchCanvasRef}
                     className="training-canvas"
-                    onMouseDown={onMouseDown}
-                    onMouseMove={onMouseMove}
-                    onMouseUp={onMouseUp}
-                    onMouseLeave={onMouseUp}
+                    onMouseDown={onSearchMouseDown}
+                    onMouseMove={onSearchMouseMove}
+                    onMouseUp={onSearchMouseUp}
+                    onMouseLeave={onSearchMouseUp}
                   />
                 ) : (
                   <div style={{ color: 'var(--color-text-tertiary)' }}>
@@ -964,10 +1076,12 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
                 )}
               </div>
             </div>
-            {draft.roi && (
+            {draft.roi ? (
               <div className="training-summary">
-                ROI: ({draft.roi.x}, {draft.roi.y}) {draft.roi.w}×{draft.roi.h}
+                {t('detection.train.search.crop', 'Drag rectangle to crop')}: ({draft.roi.x}, {draft.roi.y}) {draft.roi.w}×{draft.roi.h}
               </div>
+            ) : (
+              <div className="training-summary">{t('detection.train.search.useFull', 'Use whole frame')}</div>
             )}
           </div>
         )}
@@ -986,11 +1100,23 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
               )}
             </CompactSpace>
 
+            {trainingResult?.model && (
+              <div className="training-model-summary">
+                <div className="training-model-summary__title">
+                  {t('detection.train.model.summary', 'Trained model')}
+                </div>
+                <div className="training-model-summary__line">{trainingResult.model.summary}</div>
+                <div className="training-model-summary__line">
+                  {t('detection.train.model.samples', '{{n}} samples ({{pos}} pos / {{neg}} neg)',
+                    { n: trainingResult.model.sampleCount, pos: trainingResult.model.positiveCount, neg: trainingResult.model.negativeCount })}
+                  {trainingResult.model.meanIoU > 0 && ` · ${t('detection.train.model.iou', 'mean IoU {{value}}', { value: trainingResult.model.meanIoU.toFixed(2) })}`}
+                  {` · ${t('detection.train.model.error', 'mean error {{value}}', { value: trainingResult.model.meanError.toFixed(3) })}`}
+                </div>
+              </div>
+            )}
+
             {trainingResult && (
               <>
-                <div className="training-summary">{trainingResult.summary}</div>
-
-                {/* Kind-specific tune sliders */}
                 {kind === 'bar' && tuneTolerance !== undefined && (
                   <>
                     <div>
@@ -1034,7 +1160,7 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
           <div className="training-step">
             <div className="training-step__title">{t('detection.train.save.title', 'Name your detection & save')}</div>
             <div className="training-step__hint">
-              {t('detection.train.save.hint', 'Scripts will read this detection by name via detect.run(\'…\'). Pick a memorable name and group to organize.')}
+              {t('detection.train.save.hint', 'Saving writes the definition + the trained model + your training samples (for re-training later).')}
             </div>
             <div>
               <span style={{ fontSize: 12 }}>{t('detection.field.name', 'Name')}</span>
@@ -1048,11 +1174,19 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
                 onChange={(e) => setDraft({ ...draft, group: e.target.value || undefined })}
               />
             </div>
+            {trainingResult?.model && (
+              <div className="training-model-summary">
+                <div className="training-model-summary__title">
+                  {t('detection.train.model.summary', 'Trained model')}
+                </div>
+                <div className="training-model-summary__line">{trainingResult.model.summary}</div>
+              </div>
+            )}
             <div>
               <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
                 {t('detection.train.scriptUsage', 'Use it in a script:')}
               </span>
-              <pre className="detection-script-hint">{`const r = detect.run('${draft.name || 'detection-name'}');\n// r.value, r.found, r.match, r.triggered, r.blobs\nctx.set('${draft.name || 'value'}', r.value ?? r.found);`}</pre>
+              <pre className="detection-script-hint">{`const r = detect.run('${draft.name || 'detection-name'}');\n// r.value, r.found, r.match, r.confidence`}</pre>
             </div>
           </div>
         )}
@@ -1080,3 +1214,14 @@ export const TrainingPanel: React.FC<Props> = ({ onCancel, onSaved, reTrainDetec
     </div>
   );
 };
+
+// ---------- helpers ----------
+
+function hasValidBox(box: DetectionRoi | undefined): boolean {
+  return !!box && box.w > 0 && box.h > 0;
+}
+
+function isPositiveLabel(label: string): boolean {
+  const l = label.trim().toLowerCase();
+  return l === 'true' || l === 'yes' || l === '1' || l === '+' || l === 'positive';
+}

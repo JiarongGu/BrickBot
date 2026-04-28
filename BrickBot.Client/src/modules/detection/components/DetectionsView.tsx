@@ -199,6 +199,11 @@ export const DetectionsView: React.FC = () => {
                   >
                     <div className="detection-card__header">
                       <span className="detection-card__name">{d.name}</span>
+                      <span className={classNames('detection-trained-badge', { 'detection-trained-badge--untrained': !d.hasModel })}>
+                        {d.hasModel
+                          ? t('detection.trainedBadge', 'Trained')
+                          : t('detection.untrainedBadge', 'Untrained')}
+                      </span>
                       <CompactSpace size={2}>
                         <Tooltip title={t('detection.reTrain', 'Re-train from saved samples')}>
                           <CompactButton size="small" type="text" icon={<ExperimentOutlined />}

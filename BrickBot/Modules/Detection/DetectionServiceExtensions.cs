@@ -11,6 +11,7 @@ public static class DetectionServiceExtensions
     public static IServiceCollection AddDetectionServices(this IServiceCollection services)
     {
         services.TryAddSingleton<IDetectionFileService, DetectionFileService>();
+        services.TryAddSingleton<IDetectionModelStore, DetectionModelStore>();
         services.TryAddSingleton<IDetectionRunner, DetectionRunner>();
         services.TryAddSingleton<IDetectionTrainerService, DetectionTrainerService>();
         services.TryAddSingleton<ITrainingSampleRepository, TrainingSampleRepository>();

@@ -1,7 +1,16 @@
 # AI Assistant Guide — BrickBot
 
-**Version:** 0.1
-**Last Updated:** 2026-04-27
+**Version:** 0.2
+**Last Updated:** 2026-04-29
+
+## Changelog
+
+- **0.2 (2026-04-29)** — Detection v3 rewrite: 3-tier split (Definition / Model / Samples) with
+  per-sample object boxes, IoU diagnostics, and a separate `DetectionModel` artifact. Added
+  composite (AND/OR) detection kind, `inverse` flag, `maxHit` cap, and ROI offset modes
+  (inset / relative). New host primitive `vision.waitStable`. Per-profile input delivery mode
+  (SendInput / PostMessage / PostMessageWithPos). See D-008 (updated) and D-009 (new).
+- **0.1 (2026-04-27)** — Initial project scaffold + locked decisions D-001..D-007.
 
 > Mandatory rules are in `../CLAUDE.md` (auto-loaded). This file holds reference content: skills table, architecture quick-patterns, and documentation map.
 

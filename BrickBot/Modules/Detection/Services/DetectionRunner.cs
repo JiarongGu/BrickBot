@@ -12,19 +12,15 @@ using OpenCvSharp.Tracking;
 namespace BrickBot.Modules.Detection.Services;
 
 /// <summary>
-/// Runs a <see cref="DetectionDefinition"/> against a frame and returns the typed result.
-/// One per host (singleton); per-Run state (trackers, last-results) is held internally
-/// and torn down by <see cref="Reset"/>.
-///
-/// Dispatch table — only four kinds:
-///   • <see cref="DetectionKind.Tracker"/> — stateful OpenCV visual tracker.
-///   • <see cref="DetectionKind.Pattern"/> — ORB descriptor match (background-invariant).
-///   • <see cref="DetectionKind.Text"/>    — Tesseract OCR (NOT IMPLEMENTED YET — phase C).
-///   • <see cref="DetectionKind.Bar"/>     — fill-ratio measurement on a known bbox.
+/// Runs a (Definition, Model) pair against a frame and returns the typed result. v3 split:
+/// Definition holds runtime knobs, Model holds compiled artifacts (descriptors, init frame).
+/// The runner pulls Model from <see cref="IDetectionModelStore"/> when called via <see cref="Run"/>;
+/// callers (editor live preview) pass an in-memory candidate via <see cref="RunWithModel"/>.
 /// </summary>
 public sealed class DetectionRunner : IDetectionRunner, IDisposable
 {
     private readonly IVisionService _vision;
+    private readonly IDetectionModelStore _modelStore;
 
     /// <summary>Last result per detection id within the current Run — drives cross-detection
     /// ROI references (<see cref="DetectionRoi.FromDetectionId"/>) and bar's
@@ -32,32 +28,74 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
     private readonly ConcurrentDictionary<string, DetectionResult> _lastResults = new(StringComparer.Ordinal);
 
     /// <summary>Per-detection live tracker state. Trackers are stateful — initialized once
-    /// with the saved init frame + bbox, then updated each tick. Reset() disposes them all
-    /// so each new Run starts fresh.</summary>
+    /// with the saved init frame + bbox, then updated each tick.</summary>
     private readonly ConcurrentDictionary<string, Tracker> _trackers = new(StringComparer.Ordinal);
-
-    /// <summary>Tracks whether each cached tracker has been .Init()'d yet — OpenCvSharp's
-    /// Tracker has no <c>IsInited</c> getter, so we shadow it.</summary>
     private readonly ConcurrentDictionary<string, bool> _trackerInited = new(StringComparer.Ordinal);
 
-    public DetectionRunner(IVisionService vision)
+    /// <summary>Per-detection successful-hit counter for <see cref="DetectionDefinition.MaxHit"/>.
+    /// Increments only when the result reports <c>found = true</c> (post-inverse).</summary>
+    private readonly ConcurrentDictionary<string, int> _hitCounts = new(StringComparer.Ordinal);
+
+    public DetectionRunner(IVisionService vision, IDetectionModelStore modelStore)
     {
         _vision = vision;
+        _modelStore = modelStore;
     }
 
     public DetectionResult Run(string profileId, DetectionDefinition def, CaptureFrame frame)
     {
+        var model = _modelStore.Load(profileId, def.Id)
+            ?? throw new OperationException("DETECTION_MODEL_MISSING", new() { ["id"] = def.Id });
+        return RunWithModel(profileId, def, model, frame);
+    }
+
+    public DetectionResult RunWithModel(string profileId, DetectionDefinition def, DetectionModel model, CaptureFrame frame)
+    {
+        if (model.Kind != def.Kind)
+        {
+            throw new OperationException("DETECTION_MODEL_KIND_MISMATCH",
+                new() { ["definitionKind"] = def.Kind.ToString(), ["modelKind"] = model.Kind.ToString() });
+        }
+
         var sw = Stopwatch.StartNew();
+
+        // max_hit gate — short-circuit BEFORE the recognizer runs to skip the cost entirely.
+        if (def.MaxHit is { } cap && cap > 0
+            && !string.IsNullOrEmpty(def.Id)
+            && _hitCounts.TryGetValue(def.Id, out var hits) && hits >= cap)
+        {
+            var blocked = new DetectionResult
+            {
+                id = def.Id, name = def.Name, kind = def.Kind,
+                found = false,
+                durationMs = sw.Elapsed.TotalMilliseconds,
+            };
+            _lastResults[def.Id] = blocked;
+            return blocked;
+        }
+
         var roi = ResolveRoi(def.Roi, frame);
         var result = def.Kind switch
         {
-            DetectionKind.Tracker => RunTracker(profileId, def, frame, sw),
-            DetectionKind.Pattern => RunPattern(def, frame, roi, sw),
-            DetectionKind.Text    => RunText(def, frame, roi, sw),
-            DetectionKind.Bar     => RunBar(def, frame, roi, sw),
+            DetectionKind.Tracker   => RunTracker(profileId, def, model, frame, sw),
+            DetectionKind.Pattern   => RunPattern(def, model, frame, roi, sw),
+            DetectionKind.Text      => RunText(def, frame, roi, sw),
+            DetectionKind.Bar       => RunBar(def, frame, roi, sw),
+            DetectionKind.Composite => RunComposite(def, sw),
             _ => throw new OperationException("DETECTION_KIND_UNSUPPORTED",
                 new() { ["kind"] = def.Kind.ToString() }),
         };
+
+        // Inverse flag — flip 'found' AFTER the recognizer reports its raw result. Doesn't
+        // mutate the bbox / value / strip — those still describe what the recognizer saw.
+        if (def.Inverse) result.found = !result.found;
+
+        // Increment hit counter on success so the gate above kicks in next call.
+        if (result.found && !string.IsNullOrEmpty(def.Id))
+        {
+            _hitCounts.AddOrUpdate(def.Id, 1, (_, n) => n + 1);
+        }
+
         if (!string.IsNullOrEmpty(def.Id)) _lastResults[def.Id] = result;
         return result;
     }
@@ -68,6 +106,7 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         _trackers.Clear();
         _trackerInited.Clear();
         _lastResults.Clear();
+        _hitCounts.Clear();
     }
 
     public void Dispose() => Reset();
@@ -76,10 +115,12 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
     //  Tracker — stateful KCF / CSRT / MIL
     // ============================================================
 
-    private DetectionResult RunTracker(string profileId, DetectionDefinition def, CaptureFrame frame, Stopwatch sw)
+    private DetectionResult RunTracker(string profileId, DetectionDefinition def, DetectionModel model, CaptureFrame frame, Stopwatch sw)
     {
         var opt = def.Tracker ?? throw MissingOpts("tracker");
-        if (string.IsNullOrEmpty(opt.InitFramePng) || opt.InitW <= 0 || opt.InitH <= 0)
+        var data = model.Tracker
+            ?? throw new OperationException("DETECTION_MODEL_INVALID", new() { ["id"] = def.Id, ["kind"] = "tracker" });
+        if (string.IsNullOrEmpty(data.InitFramePng) || data.InitW <= 0 || data.InitH <= 0)
         {
             throw new OperationException("DETECTION_TRACKER_NOT_TRAINED", new() { ["id"] = def.Id });
         }
@@ -89,12 +130,12 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
 
         if (tracker is { } t && !TrackerIsInited(key))
         {
-            using var initBytes = Cv2.ImDecode(Convert.FromBase64String(opt.InitFramePng), ImreadModes.Color);
+            using var initBytes = Cv2.ImDecode(Convert.FromBase64String(data.InitFramePng), ImreadModes.Color);
             if (initBytes.Empty())
             {
                 throw new OperationException("DETECTION_TRACKER_INIT_DECODE_FAILED", new() { ["id"] = def.Id });
             }
-            t.Init(initBytes, new Rect(opt.InitX, opt.InitY, opt.InitW, opt.InitH));
+            t.Init(initBytes, new Rect(data.InitX, data.InitY, data.InitW, data.InitH));
             _trackerInited[key] = true;
         }
 
@@ -131,15 +172,17 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
     //  Pattern — ORB descriptor match
     // ============================================================
 
-    private DetectionResult RunPattern(DetectionDefinition def, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
+    private DetectionResult RunPattern(DetectionDefinition def, DetectionModel model, CaptureFrame frame, RegionOfInterest? roi, Stopwatch sw)
     {
         var opt = def.Pattern ?? throw MissingOpts("pattern");
-        if (string.IsNullOrEmpty(opt.Descriptors) || opt.KeypointCount <= 0)
+        var data = model.Pattern
+            ?? throw new OperationException("DETECTION_MODEL_INVALID", new() { ["id"] = def.Id, ["kind"] = "pattern" });
+        if (string.IsNullOrEmpty(data.Descriptors) || data.KeypointCount <= 0)
         {
             throw new OperationException("DETECTION_PATTERN_NOT_TRAINED", new() { ["id"] = def.Id });
         }
 
-        using var trainDescriptors = DeserializeDescriptors(opt.Descriptors, opt.KeypointCount);
+        using var trainDescriptors = DeserializeDescriptors(data.Descriptors, data.KeypointCount);
 
         var match = _vision.MatchPattern(frame, trainDescriptors,
             new PatternMatchOptions(
@@ -147,8 +190,8 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
                 LoweRatio: opt.LoweRatio,
                 MinConfidence: opt.MinConfidence,
                 MaxRuntimeKeypoints: opt.MaxRuntimeKeypoints,
-                TemplateWidth: opt.TemplateWidth,
-                TemplateHeight: opt.TemplateHeight));
+                TemplateWidth: data.TemplateWidth,
+                TemplateHeight: data.TemplateHeight));
 
         return new DetectionResult
         {
@@ -160,12 +203,6 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         };
     }
 
-    /// <summary>
-    /// Decode a base64-encoded BRISK descriptor blob back into an 8U N×64 Mat. Trainer
-    /// encoded it row-major; this just lays the bytes back into a Mat with the same shape.
-    /// Width is inferred from <c>bytes.Length / rows</c> — supports legacy ORB (32-byte) and
-    /// current BRISK (64-byte) blobs without a schema bump.
-    /// </summary>
     private static Mat DeserializeDescriptors(string base64, int rows)
     {
         var bytes = Convert.FromBase64String(base64);
@@ -222,8 +259,6 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
     {
         var opt = def.Bar ?? throw MissingOpts("bar");
 
-        // Locate the bar's bbox: either from a referenced Pattern detection's last match,
-        // or from the detection's own ROI directly.
         Rect bbox;
         if (!string.IsNullOrEmpty(opt.AnchorPatternId)
             && _lastResults.TryGetValue(opt.AnchorPatternId, out var anchor)
@@ -243,8 +278,6 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
         var fillColor = new ColorSample(opt.FillColor.R, opt.FillColor.G, opt.FillColor.B);
         var horizontal = opt.Direction == FillDirection.LeftToRight || opt.Direction == FillDirection.RightToLeft;
 
-        // Sample a thin strip across the densest fill row/column inside the bar (drops icon
-        // endcaps via the inset percentages), then measure linear fill ratio along it.
         int stripX, stripY, stripW, stripH;
         if (horizontal)
         {
@@ -300,6 +333,49 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
     }
 
     // ============================================================
+    //  Composite — boolean AND/OR over other detections
+    // ============================================================
+
+    private DetectionResult RunComposite(DetectionDefinition def, Stopwatch sw)
+    {
+        var opt = def.Composite ?? throw MissingOpts("composite");
+        if (opt.DetectionIds is null || opt.DetectionIds.Length == 0)
+        {
+            return new DetectionResult
+            {
+                id = def.Id, name = def.Name, kind = def.Kind,
+                found = false,
+                durationMs = sw.Elapsed.TotalMilliseconds,
+            };
+        }
+
+        // AND: all operands must report found=true. OR: any one. Operands are pulled from the
+        // per-Run result cache — composites depend on their operands having ALREADY run this
+        // tick. StdLib's detect.runAll runs composites in a 3rd pass so the cache is populated.
+        bool found = opt.Op == CompositeOp.And;
+        foreach (var id in opt.DetectionIds)
+        {
+            var matched = _lastResults.TryGetValue(id, out var r) && r.found;
+            if (opt.Op == CompositeOp.And)
+            {
+                if (!matched) { found = false; break; }
+            }
+            else
+            {
+                if (matched) { found = true; break; }
+                found = false;
+            }
+        }
+
+        return new DetectionResult
+        {
+            id = def.Id, name = def.Name, kind = def.Kind,
+            found = found,
+            durationMs = sw.Elapsed.TotalMilliseconds,
+        };
+    }
+
+    // ============================================================
     //  ROI resolution
     // ============================================================
 
@@ -313,6 +389,17 @@ public sealed class DetectionRunner : IDetectionRunner, IDisposable
             {
                 return null;
             }
+
+            // Mode-dependent interpretation of X/Y/W/H. Inset (default) shrinks the parent
+            // bbox inward; Relative anchors a sub-region at an explicit offset within it.
+            var mode = roi.OffsetMode ?? RoiOffsetMode.Inset;
+            if (mode == RoiOffsetMode.Relative)
+            {
+                var w = roi.W <= 0 ? src.match.w : roi.W;
+                var h = roi.H <= 0 ? src.match.h : roi.H;
+                return new RegionOfInterest(src.match.x + roi.X, src.match.y + roi.Y, w, h);
+            }
+
             var insetL = Math.Max(0, roi.X);
             var insetT = Math.Max(0, roi.Y);
             var insetR = Math.Max(0, roi.W);

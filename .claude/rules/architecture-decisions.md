@@ -79,9 +79,10 @@ For authoring template PNGs that scripts reference via `vision.find('name.png')`
 - **Operations**: ORB descriptor extraction + matching (`ExtractDescriptors`, `MatchPattern`), color-at-point, `PercentBar` / `LinearFillRatio` (bar fill scan), stateful visual trackers, OCR ROI.
 - All vision ops accept an optional ROI to keep latency low for action-game use.
 
-### Locked-in detection kinds (v2 rewrite)
+### Locked-in detection kinds (v3 — 2026-04-29)
 
-Only **four** kinds — everything else (`template`, `progressBar`, `colorPresence`, `effect`, `region`, `featureMatch`) was deleted:
+**Five** kinds. Old `template / progressBar / colorPresence / effect / region / featureMatch`
+were deleted in v2; v3 added `composite`:
 
 | Kind | Approach | Use case |
 |---|---|---|
@@ -89,19 +90,47 @@ Only **four** kinds — everything else (`template`, `progressBar`, `colorPresen
 | `pattern` | ORB keypoint + descriptor match (BFMatcher + Lowe ratio + RANSAC localization) | Static element appearance, background-invariant |
 | `text` | Tesseract OCR with optional binarize + upscale | Buff names, status banners, quest text |
 | `bar` | `LinearFillRatio` along inferred direction | HP / MP / cooldown meters |
+| `composite` | Boolean AND/OR over other detections | Combine: "ConfirmDialog = button-pattern AND ok-text" |
 
-Trained-detection models live INSIDE the detection definition's options block:
-- `pattern.descriptors` — base64 ORB descriptor blob (rows × 32 bytes).
-- `pattern.embeddedPng` — cropped reference patch (re-training + overlay).
-- `tracker.initFramePng` — full frame the tracker was initialized on.
-- `text` — language + page-seg + regex; no embedded data.
-- `bar` — fill color + direction + line threshold derived by the trainer.
+### Detection v3 — 3-tier persistence (2026-04-29)
 
-No external Templates-table dependency. `data/<profile>/templates/` is unused for new detections.
+Trained artifacts moved out of `DetectionDefinition` into a separate `DetectionModel` file:
+
+- **`DetectionDefinition`** (SQLite `Detections` row, JSON blob) — runtime config: kind, name,
+  search ROI, output bindings, post-training tunables (loweRatio, minConfidence, fillColor,
+  lineThreshold, etc), `Inverse`, `MaxHit`.
+- **`DetectionModel`** (file at `data/profiles/{id}/models/{detectionId}.model.json`) —
+  trainer output: `Pattern.Descriptors`, `Pattern.EmbeddedPng`, `Tracker.InitFramePng`,
+  `Bar` snapshot, `Text.EmbeddedPng`, training metadata (sample count, mean IoU, mean error).
+- **`TrainingSamples`** (SQLite + on-disk PNGs) — raw labeled inputs WITH per-sample `ObjectBox`
+  + `IsInit` flag. Used to re-train.
+
+The runner needs both Definition + Model. Editor's live-preview path passes a candidate model
+directly via `IDetectionRunner.RunWithModel(...)`; saved-detection runs pull from
+`IDetectionModelStore.Load(...)`. Existence of the model file = "Trained" badge.
+
+### v3 runtime tunables (cross-kind)
+
+- `inverse: bool` — flips `result.found`. Saves `!detect.run(x).found` boilerplate.
+- `maxHit: int?` — auto-disable after N successful runs. Resets in `IDetectionRunner.Reset()`
+  (every run start).
+- `roi.offsetMode: 'inset' | 'relative'` when chained via `fromDetectionId`. Inset (default) =
+  shrink parent inward (legacy semantics). Relative = sub-region at offset + absolute size.
+
+### v3 host primitive
+
+- `vision.waitStable(roi, { stableMs?, maxDiff?, intervalMs?, timeoutMs? }) → boolean` —
+  block until ROI pixels settle. Mean-abs-diff between consecutive frames ≤ `maxDiff` for
+  `stableMs` ms. Default `maxDiff` 0.02 (per-channel, normalized 0..1).
 
 ## Input
 
-- Use `SendInput` (Win32) — works in most games. Fall back to `keybd_event` / `mouse_event` if needed.
+- Default mode: `SendInput` (Win32) — OS-level, works against any focused window.
+- **Per-profile mode picker** (D-009): `ProfileConfiguration.Input.Mode = SendInput |
+  PostMessage | PostMessageWithPos`. PostMessage modes deliver via `PostMessage(hwnd, ...)`
+  directly to the target HWND so no focus / cursor steal — background-friendly play.
+- `RunnerService.Start` writes `_input.Mode` + `_input.TargetWindow` from the active profile's
+  config. Existing scripts pick up the new mode without changes.
 - Coordinates are by default **relative to the captured window**, not screen. The Input service translates to screen coords via the current capture target.
 
 ## Persistence

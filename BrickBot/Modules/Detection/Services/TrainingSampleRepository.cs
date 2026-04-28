@@ -36,15 +36,17 @@ public sealed class TrainingSampleRepository : ITrainingSampleRepository
         await using var conn = OpenConnection(profileId);
         if (entity.CapturedAt == default) entity.CapturedAt = DateTime.UtcNow;
         const string sql = @"
-            INSERT INTO TrainingSamples (Id, DetectionId, Label, Note, Width, Height, CapturedAt)
-            VALUES (@Id, @DetectionId, @Label, @Note, @Width, @Height, @CapturedAt)
+            INSERT INTO TrainingSamples (Id, DetectionId, Label, Note, Width, Height, CapturedAt, ObjectBoxJson, IsInit)
+            VALUES (@Id, @DetectionId, @Label, @Note, @Width, @Height, @CapturedAt, @ObjectBoxJson, @IsInit)
             ON CONFLICT(Id) DO UPDATE SET
                 DetectionId = excluded.DetectionId,
                 Label = excluded.Label,
                 Note = excluded.Note,
                 Width = excluded.Width,
                 Height = excluded.Height,
-                CapturedAt = excluded.CapturedAt;";
+                CapturedAt = excluded.CapturedAt,
+                ObjectBoxJson = excluded.ObjectBoxJson,
+                IsInit = excluded.IsInit;";
         await conn.ExecuteAsync(sql, entity).ConfigureAwait(false);
     }
 

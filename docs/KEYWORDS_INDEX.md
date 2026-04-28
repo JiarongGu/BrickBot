@@ -16,3 +16,6 @@ Top-level keyword → file lookup. For deeper jumps see `keywords/BACKEND.md`, `
 | JavaScript scripting API | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-007 (supersedes D-002) |
 | Capture pipeline | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-003 |
 | Vision (OpenCV) | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-004 |
+| Detection model (3-tier split) | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-008 |
+| Detection kinds (tracker/pattern/text/bar/composite) | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-008 |
+| Input delivery modes (SendInput / PostMessage) | [core/DESIGN_DECISIONS.md](core/DESIGN_DECISIONS.md) | D-009 |
